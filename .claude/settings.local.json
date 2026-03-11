@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"C:/Code/JAVA/niconicode\" && python -c \"\nimport zipfile\nimport xml.etree.ElementTree as ET\nimport sys\n\nsys.stdout.reconfigure\\(encoding='utf-8'\\)\n\ndef read_docx\\(path\\):\n    with zipfile.ZipFile\\(path\\) as z:\n        xml_content = z.read\\('word/document.xml'\\)\n    tree = ET.fromstring\\(xml_content\\)\n    ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}\n    paragraphs = tree.findall\\('.//w:p', ns\\)\n    text = []\n    for p in paragraphs:\n        runs = p.findall\\('.//w:t', ns\\)\n        line = ''.join\\(r.text for r in runs if r.text\\)\n        text.append\\(line\\)\n    return '\\\\n'.join\\(text\\)\n\nprint\\(read_docx\\('项目大致说明.docx'\\)\\)\n\")",
+      "Bash(ls -lh /c/Code/JAVA/*.zip)",
+      "Bash(java -version 2>&1; mvn -version 2>&1 | head -3; node -v 2>&1; npm -v 2>&1)",
+      "Bash(mvn compile:*)",
+      "Bash(mvn dependency:tree -q 2>&1 | grep -i \"mybatis\\\\|lombok\" | head -10)",
+      "Bash(mvn dependency:tree 2>&1 | grep -i \"mybatis\\\\|lombok\" | head -10)",
+      "Read(//c/Users/13515/.m2/repository/com/baomidou/mybatis-plus-extension/3.5.9/**)",
+      "Bash(2)",
+      "Bash(find ~/.m2/repository/com/baomidou/mybatis-plus-extension/3.5.9/ -name \"*.jar\" ! -name \"*sources*\" -exec jar tf {} \\\\; 2>/dev/null | grep \"InnerInterceptor\" | head -10)",
+      "Bash(mvn dependency:tree 2>&1 | grep -i \"jsqlparser\" | head -5)",
+      "Bash(cd frontend:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vite:*)"
+    ]
+  }
+}
