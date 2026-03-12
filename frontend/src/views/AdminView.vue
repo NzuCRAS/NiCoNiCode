@@ -347,7 +347,7 @@ const editModal = reactive({
   title: '',
   type: '' as 'report' | 'knowledge' | 'tech',
   id: 0,
-  data: { title: '', content: '', categoryId: null as number | null, status: '', category: '', githubRepo: '', officialUrl: '', rssUrl: '' }
+  data: {} as any
 })
 
 const sessionModal = reactive({
