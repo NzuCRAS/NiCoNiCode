@@ -48,6 +48,7 @@ public class ChatService {
     public ChatResp processMessage(Long userId, ChatReq req) {
         // 1. 获取或创建会话
         ChatSession session = memoryService.getOrCreateSession(userId, req.getSessionId(), req.getMessage());
+        boolean isFirstMessage = isFirstMessage(session.getId());
 
         // 2. RAG 检索
         String ragContext = ragService.retrieveContext(req.getMessage());
@@ -69,10 +70,17 @@ public class ChatService {
         memoryService.saveMessage(session.getId(), "USER", req.getMessage());
         memoryService.saveMessage(session.getId(), "ASSISTANT", reply);
 
+        // 6. 首次回答后自动生成会话标题
+        String sessionTitle = session.getTitle();
+        if (isFirstMessage && "新对话".equals(sessionTitle)) {
+            sessionTitle = generateSessionTitle(req.getMessage(), reply);
+            memoryService.updateSessionTitle(session.getId(), sessionTitle);
+        }
+
         return ChatResp.builder()
                 .sessionId(session.getId())
                 .reply(reply)
-                .sessionTitle(session.getTitle())
+                .sessionTitle(sessionTitle)
                 .build();
     }
 
@@ -157,5 +165,30 @@ public class ChatService {
         // 当前用户消息
         messages.add(UserMessage.from(userMessage));
         return messages;
+    }
+
+    /**
+     * 检查是否是会话的第一条消息
+     */
+    private boolean isFirstMessage(Long sessionId) {
+        // 检查当前会话是否有任何消息
+        List<ChatMessage> messages = memoryService.getSessionMessagesDirectly(sessionId);
+        return messages == null || messages.isEmpty();
+    }
+
+    /**
+     * 基于用户问题和AI回答生成会话标题
+     */
+    private String generateSessionTitle(String userMessage, String aiReply) {
+        // 简单的启发式方法：从用户问题中提取标题
+        // 优先取问号之前的内容，否则取前20个字符
+        String title = userMessage;
+        int questionMarkIdx = userMessage.indexOf('?');
+        if (questionMarkIdx > 0) {
+            title = userMessage.substring(0, questionMarkIdx);
+        } else if (userMessage.length() > 20) {
+            title = userMessage.substring(0, 20);
+        }
+        return title;
     }
 }

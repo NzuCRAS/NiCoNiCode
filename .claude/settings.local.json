@@ -13,7 +13,8 @@
       "Bash(mvn dependency:tree 2>&1 | grep -i \"jsqlparser\" | head -5)",
       "Bash(cd frontend:*)",
       "Bash(npm install:*)",
-      "Bash(npx vite:*)"
+      "Bash(npx vite:*)",
+      "Bash(mvn clean:*)"
     ]
   }
 }

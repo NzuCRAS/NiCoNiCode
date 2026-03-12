@@ -98,7 +98,19 @@ async function handleSend() {
 }
 
 async function newChat() {
-  await chatStore.createSession()
+  // 检查是否已经有空的新对话
+  const existingNewChat = chatStore.sessions.find(s => {
+    // 检查是否是"新对话"或没有发送消息的对话
+    return s.title === "新对话" || !chatStore.messages.length
+  })
+
+  if (existingNewChat) {
+    // 如果已经有未发送消息的新对话，直接选中它
+    await selectSession(existingNewChat.id)
+  } else {
+    // 否则创建新会话
+    await chatStore.createSession()
+  }
 }
 
 async function selectSession(id: number) {

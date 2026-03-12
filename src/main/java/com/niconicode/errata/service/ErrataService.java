@@ -44,6 +44,7 @@ public class ErrataService {
                 new LambdaQueryWrapper<Errata>()
                         .eq(Errata::getDocType, docType)
                         .eq(Errata::getDocId, docId)
+                        .eq(Errata::getStatus, "ACCEPTED")  // 只返回已接纳的勘误
                         .orderByDesc(Errata::getCreatedAt));
         return list.stream().map(this::toResp).collect(Collectors.toList());
     }

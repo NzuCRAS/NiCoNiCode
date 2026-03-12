@@ -47,3 +47,46 @@ Rust 1.94.0 发布
 4.给技术报道和知识库增加一个tag和分类系统，在生成时由ai自动添加
 5.为管理员，也就是role为ADMIN的用户提供一个管理页面，里面提供一些功能，包括编辑/发布/管理技术报道和知识文档（包括tag和分类），管理分类，查看用户提供的”勘误“（提供一个打勾打叉的功能，分别标识勘误有效且已修复/勘误有误）
 6.当你进行完以上修改之后，请你生成一份文档，讲解一下我们现在完成了哪些工作，特别是我们ai agent这边使用了哪些技术和架构，我们的技术跟踪从标记某个技术，如何追踪该技术，一直到生成文档这整个链路，我在后续主要就要进行agent这边的设计以及优化
+
+3.11 16.43
+1.运行时报错：
+org.springframework.jdbc.BadSqlGrammarException: 
+### Error querying database.  Cause: java.sql.SQLSyntaxErrorException: Unknown column 'category_id' in 'field list'
+### The error may exist in com/niconicode/agent/tracker/mapper/TechReportMapper.java (best guess)
+### The error may involve defaultParameterMap
+### The error occurred while setting parameters
+### SQL: SELECT  id,tracked_tech_id,title,content,new_version,change_summary,source_urls,category_id,status,published_at,created_at  FROM tech_report      WHERE  (status = ?) ORDER BY published_at DESC LIMIT 3
+### Cause: java.sql.SQLSyntaxErrorException: Unknown column 'category_id' in 'field list'
+; bad SQL grammar []
+	at org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator.doTranslate(SQLErrorCodeSQLExceptionTranslator.java:246) ~[spring-jdbc-6.1.15.jar:6.1.15]
+但我已运行新的sql文件
+2.管理员的管理页面需要增加一个发布新的报道以及知识文档的功能，同时要对已经存在的报道/文档提供修改/删除的功能
+3.ai对话这里，没有正确地处理会话的逻辑，最好是能够在第一次回答之后给这段对话命名一个标题，就像deepseek网页版那样，此外，现在点击“+新对话”这个按钮，会无限制地增加新对话，实际上应该同一时间只允许出现一个没有发送消息的新对话
+4.管理后台同时也要提供一个管理追踪的技术（包括追踪什么技术，通过什么追踪都要能够修改/删除/增加）的功能
+5.用户管理处增加一个查看其所有ai会话的功能，同时提供整个会话的删除功能
+
+3.11 23.05
+1.访问管理员的管理后台时出现前端报错如下：
+[plugin:vite:vue] Invalid end tag.
+C:/Code/JAVA/NiCoNiCode/frontend/src/views/AdminView.vue:79:7
+77 |            </tr>
+78 |          </tbody>
+79 |        </table>
+   |         ^
+80 |      </div>
+81 |
+2.现在技术报道页面中，在外部查看某个报道的略缩文本时还是没能正确解析其结构，比如说在外面会显示成这样：
+v25.8.1 2026/3/11
+Node.js v25.8.1 发布
+Notable Changes \[ea87eea71a]- module: fix extensionless CjS files in"type": "module" packages (Matteo Collina)#62083 Commits\[bab750d1b3]-build
+但是知识库页面中就没有这个问题，能够正常解析并且显示：
+技术报道2026/3/11 10 次查看
+Node.js v25.8.1 发布
+Nodeis v25.8.1发布:修复模块系统关键问题，优化加密功能 2026年3月11日，Nodeis 团队正式发布了v25.81版本。此次更新虽为补丁版本，但包含了多项重要修复，特别是解决了模块系统中长期存在的扩展名解析问题，并对加密和安全相关功能进行了多项优化。 版本亮点 模块系统关键修复:解决了.
+Node.js运行时
+需要进行修复
+3.现在技术报道和知识库具体的某个文档/报道下方的勘误不提供查看其他用户的勘误这个功能，用户发出的勘误只有管理员能在后台查看并进行相关操作，而且在后台中要提供一个按钮点击跳转到对应的文档/报道中，同时提供一个可拖拽可放大缩小的弹窗显示该用户勘误的完整内容
+4.给技术报道以及知识库的报道/文档加上一个发布日期以及修改日期的时间戳
+5.技术报道在被保存为知识文档时需要根据内容标记好对应的分类以及tag
+6.技术报道在ai编写的时候，我们的标准需要修改一下，不是硬性地要求一定要多少字，而是让ai把这次更新每个地方都讲清楚，此外，需要给每篇技术报道都增加一个技术指数，在ai编写时生成，根据这次更新的质量以及影响因子来判断，范围为0 - 1000，举例，0为一个无人在意的小型开源项目的一次README文件更新，而1000代表着claude等最前沿的大模型的版本迭代，这个指数是恒定的，记录下来就不变，然后后续和我们的时间指数（代表着该报道的时效性，总分为840，刚发布时满分，每小时跌5分），这个时间指数是实时变化且实时计算的，这两个指数结合起来进行技术报道的优先级排序，具体的排序以及前端展示后续再进行设计
+7.需要给管理员的管理页面增加一个管理追踪的技术的功能

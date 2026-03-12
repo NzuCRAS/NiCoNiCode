@@ -19,6 +19,7 @@
           <option value="PUBLISHED">已发布</option>
           <option value="DRAFT">草稿</option>
         </select>
+        <button @click="newReport" class="bg-primary text-white px-4 py-1.5 rounded text-sm hover:bg-primary-dark ml-auto">+ 发布新报道</button>
       </div>
       <table class="w-full text-sm">
         <thead class="bg-gray-50">
@@ -51,6 +52,9 @@
 
     <!-- 知识库管理 -->
     <div v-if="activeTab === 'knowledge'">
+      <div class="flex space-x-2 mb-4">
+        <button @click="newKnowledge" class="bg-primary text-white px-4 py-1.5 rounded text-sm hover:bg-primary-dark ml-auto">+ 发布新文档</button>
+      </div>
       <table class="w-full text-sm">
         <thead class="bg-gray-50">
           <tr>
@@ -70,6 +74,46 @@
             <td class="px-4 py-2 space-x-2">
               <button @click="editKnowledge(d)" class="text-primary hover:underline">编辑</button>
               <button @click="deleteKnowledge(d.id)" class="text-red-500 hover:underline">删除</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- 追踪技术管理 -->
+    <div v-if="activeTab === 'techs'">
+      <div class="flex space-x-2 mb-4">
+        <button @click="newTech" class="bg-primary text-white px-4 py-1.5 rounded text-sm hover:bg-primary-dark">+ 添加技术</button>
+      </div>
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50">
+          <tr>
+            <th class="text-left px-4 py-2">技术名称</th>
+            <th class="text-left px-4 py-2">分类</th>
+            <th class="text-left px-4 py-2">GitHub仓库</th>
+            <th class="text-left px-4 py-2">官网</th>
+            <th class="text-left px-4 py-2">RSS源</th>
+            <th class="text-left px-4 py-2">状态</th>
+            <th class="text-left px-4 py-2">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="t in trackedTechs" :key="t.id" class="border-b">
+            <td class="px-4 py-2">{{ t.name }}</td>
+            <td class="px-4 py-2">{{ t.category }}</td>
+            <td class="px-4 py-2 text-xs">{{ t.githubRepo }}</td>
+            <td class="px-4 py-2 text-xs truncate">{{ t.officialUrl }}</td>
+            <td class="px-4 py-2 text-xs truncate">{{ t.rssUrl }}</td>
+            <td class="px-4 py-2">
+              <select :value="t.status" @change="updateTechStatus(t.id, ($event.target as HTMLSelectElement).value)"
+                class="border rounded px-2 py-0.5 text-xs">
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="PAUSED">PAUSED</option>
+              </select>
+            </td>
+            <td class="px-4 py-2 space-x-2 text-sm">
+              <button @click="editTech(t)" class="text-primary hover:underline">编辑</button>
+              <button @click="deleteTech(t.id)" class="text-red-500 hover:underline">删除</button>
             </td>
           </tr>
         </tbody>
@@ -166,7 +210,9 @@
                 <option value="DISABLED">DISABLED</option>
               </select>
             </td>
-            <td class="px-4 py-2 text-xs text-gray-400">{{ formatDate(u.createdAt) }}</td>
+            <td class="px-4 py-2 text-sm space-x-1">
+              <button @click="viewUserSessions(u.id, u.nickname)" class="text-primary hover:underline">会话</button>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -177,27 +223,61 @@
       <div class="bg-white rounded-xl p-6 w-full max-w-2xl max-h-[80vh] overflow-y-auto">
         <h3 class="text-lg font-semibold mb-4">{{ editModal.title }}</h3>
         <div class="space-y-3">
-          <div>
-            <label class="text-sm text-gray-600">标题</label>
-            <input v-model="editModal.data.title" class="w-full border rounded px-3 py-2 text-sm" />
+          <!-- 报道和知识文档字段 -->
+          <div v-if="editModal.type !== 'tech'">
+            <div>
+              <label class="text-sm text-gray-600">标题</label>
+              <input v-model="editModal.data.title" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label class="text-sm text-gray-600">内容</label>
+              <textarea v-model="editModal.data.content" rows="10" class="w-full border rounded px-3 py-2 text-sm font-mono"></textarea>
+            </div>
+            <div class="flex space-x-3">
+              <div>
+                <label class="text-sm text-gray-600">分类</label>
+                <select v-model="editModal.data.categoryId" class="border rounded px-3 py-2 text-sm">
+                  <option :value="null">无分类</option>
+                  <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+                </select>
+              </div>
+              <div v-if="editModal.type === 'report'">
+                <label class="text-sm text-gray-600">状态</label>
+                <select v-model="editModal.data.status" class="border rounded px-3 py-2 text-sm">
+                  <option value="DRAFT">草稿</option>
+                  <option value="PUBLISHED">已发布</option>
+                </select>
+              </div>
+            </div>
           </div>
-          <div>
-            <label class="text-sm text-gray-600">内容</label>
-            <textarea v-model="editModal.data.content" rows="10" class="w-full border rounded px-3 py-2 text-sm font-mono"></textarea>
-          </div>
-          <div class="flex space-x-3">
+
+          <!-- 追踪技术字段 -->
+          <div v-if="editModal.type === 'tech'" class="space-y-3">
+            <div>
+              <label class="text-sm text-gray-600">技术名称</label>
+              <input v-model="editModal.data.title" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
             <div>
               <label class="text-sm text-gray-600">分类</label>
-              <select v-model="editModal.data.categoryId" class="border rounded px-3 py-2 text-sm">
-                <option :value="null">无分类</option>
-                <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
-              </select>
+              <input v-model="editModal.data.category" class="w-full border rounded px-3 py-2 text-sm" placeholder="如：框架、语言、工具" />
             </div>
-            <div v-if="editModal.type === 'report'">
+            <div>
+              <label class="text-sm text-gray-600">GitHub 仓库</label>
+              <input v-model="editModal.data.githubRepo" class="w-full border rounded px-3 py-2 text-sm" placeholder="owner/repo" />
+            </div>
+            <div>
+              <label class="text-sm text-gray-600">官方网址</label>
+              <input v-model="editModal.data.officialUrl" type="url" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label class="text-sm text-gray-600">RSS 源</label>
+              <input v-model="editModal.data.rssUrl" type="url" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div>
               <label class="text-sm text-gray-600">状态</label>
               <select v-model="editModal.data.status" class="border rounded px-3 py-2 text-sm">
-                <option value="DRAFT">草稿</option>
-                <option value="PUBLISHED">已发布</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="PAUSED">PAUSED</option>
               </select>
             </div>
           </div>
@@ -205,6 +285,32 @@
         <div class="flex justify-end space-x-2 mt-4">
           <button @click="editModal.show = false" class="px-4 py-1.5 rounded text-sm bg-gray-100 hover:bg-gray-200">取消</button>
           <button @click="saveEdit" class="px-4 py-1.5 rounded text-sm bg-primary text-white hover:bg-primary-dark">保存</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 用户会话弹窗 -->
+    <div v-if="sessionModal.show" class="fixed inset-0 bg-black/40 z-50 flex items-center justify-center" @click.self="sessionModal.show = false">
+      <div class="bg-white rounded-xl p-6 w-full max-w-4xl max-h-[80vh] overflow-y-auto">
+        <h3 class="text-lg font-semibold mb-4">用户 {{ sessionModal.userName }} 的AI会话</h3>
+        <div v-if="sessionModal.sessions.length === 0" class="text-center text-gray-400 py-8">
+          此用户暂无会话
+        </div>
+        <div v-else class="space-y-3">
+          <div v-for="session in sessionModal.sessions" :key="session.id" class="border rounded p-4 bg-gray-50">
+            <div class="flex justify-between items-start">
+              <div class="flex-1">
+                <h4 class="font-medium">{{ session.title }}</h4>
+                <p class="text-xs text-gray-400 mt-1">ID: {{ session.id }}</p>
+                <p class="text-xs text-gray-400">创建时间: {{ formatDate(session.createdAt) }}</p>
+                <p class="text-xs text-gray-400">更新时间: {{ formatDate(session.updatedAt) }}</p>
+              </div>
+              <button @click="deleteUserSession(session.id)" class="text-red-500 hover:underline text-sm">删除</button>
+            </div>
+          </div>
+        </div>
+        <div class="flex justify-end mt-4">
+          <button @click="sessionModal.show = false" class="px-4 py-1.5 rounded text-sm bg-gray-100 hover:bg-gray-200">关闭</button>
         </div>
       </div>
     </div>
@@ -218,6 +324,7 @@ import api from '../services/api'
 const tabs = [
   { key: 'reports', label: '报道管理' },
   { key: 'knowledge', label: '知识库管理' },
+  { key: 'techs', label: '追踪技术' },
   { key: 'categories', label: '分类管理' },
   { key: 'errata', label: '勘误审核' },
   { key: 'users', label: '用户管理' }
@@ -226,6 +333,7 @@ const activeTab = ref('reports')
 
 const reports = ref<any[]>([])
 const knowledgeDocs = ref<any[]>([])
+const trackedTechs = ref<any[]>([])
 const categories = ref<any[]>([])
 const errataList = ref<any[]>([])
 const users = ref<any[]>([])
@@ -237,14 +345,22 @@ const newCategory = reactive({ name: '', description: '', sortOrder: 0 })
 const editModal = reactive({
   show: false,
   title: '',
-  type: '' as 'report' | 'knowledge',
+  type: '' as 'report' | 'knowledge' | 'tech',
   id: 0,
-  data: { title: '', content: '', categoryId: null as number | null, status: '' }
+  data: { title: '', content: '', categoryId: null as number | null, status: '', category: '', githubRepo: '', officialUrl: '', rssUrl: '' }
+})
+
+const sessionModal = reactive({
+  show: false,
+  userId: 0,
+  userName: '',
+  sessions: [] as any[]
 })
 
 watch(activeTab, (tab) => {
   if (tab === 'reports') loadReports()
   else if (tab === 'knowledge') loadKnowledge()
+  else if (tab === 'techs') loadTrackedTechs()
   else if (tab === 'categories') loadCategories()
   else if (tab === 'errata') loadErrata()
   else if (tab === 'users') loadUsers()
@@ -268,6 +384,13 @@ async function loadKnowledge() {
   try {
     const res: any = await api.get('/admin/knowledge', { params: { page: 1, size: 50 } })
     knowledgeDocs.value = res.data?.records || []
+  } catch { /* ignore */ }
+}
+
+async function loadTrackedTechs() {
+  try {
+    const res: any = await api.get('/admin/techs')
+    trackedTechs.value = res.data || []
   } catch { /* ignore */ }
 }
 
@@ -302,6 +425,14 @@ function editReport(r: any) {
   editModal.data = { title: r.title, content: r.content, categoryId: r.categoryId, status: r.status }
 }
 
+function newReport() {
+  editModal.show = true
+  editModal.title = '发布新报道'
+  editModal.type = 'report'
+  editModal.id = 0
+  editModal.data = { title: '', content: '', categoryId: null, status: 'DRAFT' }
+}
+
 function editKnowledge(d: any) {
   editModal.show = true
   editModal.title = '编辑知识文档'
@@ -310,14 +441,51 @@ function editKnowledge(d: any) {
   editModal.data = { title: d.title, content: d.content, categoryId: d.categoryId, status: d.status }
 }
 
+function newKnowledge() {
+  editModal.show = true
+  editModal.title = '发布新文档'
+  editModal.type = 'knowledge'
+  editModal.id = 0
+  editModal.data = { title: '', content: '', categoryId: null, status: 'ACTIVE' }
+}
+
 async function saveEdit() {
   try {
     if (editModal.type === 'report') {
-      await api.put(`/admin/reports/${editModal.id}`, editModal.data)
+      if (editModal.id === 0) {
+        // 新建报道
+        await api.post('/admin/reports', editModal.data)
+      } else {
+        // 编辑报道
+        await api.put(`/admin/reports/${editModal.id}`, editModal.data)
+      }
       await loadReports()
-    } else {
-      await api.put(`/admin/knowledge/${editModal.id}`, editModal.data)
+    } else if (editModal.type === 'knowledge') {
+      if (editModal.id === 0) {
+        // 新建知识文档
+        await api.post('/admin/knowledge', editModal.data)
+      } else {
+        // 编辑知识文档
+        await api.put(`/admin/knowledge/${editModal.id}`, editModal.data)
+      }
       await loadKnowledge()
+    } else if (editModal.type === 'tech') {
+      const techData = {
+        name: editModal.data.title,
+        category: editModal.data.category,
+        githubRepo: editModal.data.githubRepo,
+        officialUrl: editModal.data.officialUrl,
+        rssUrl: editModal.data.rssUrl,
+        status: editModal.data.status
+      }
+      if (editModal.id === 0) {
+        // 新建技术
+        await api.post('/admin/techs', techData)
+      } else {
+        // 编辑技术
+        await api.put(`/admin/techs/${editModal.id}`, techData)
+      }
+      await loadTrackedTechs()
     }
     editModal.show = false
   } catch { /* ignore */ }
@@ -333,6 +501,43 @@ async function deleteKnowledge(id: number) {
   if (!confirm('确认删除此文档？')) return
   await api.delete(`/admin/knowledge/${id}`)
   await loadKnowledge()
+}
+
+function editTech(t: any) {
+  editModal.show = true
+  editModal.title = '编辑追踪技术'
+  editModal.type = 'tech'
+  editModal.id = t.id
+  editModal.data = {
+    ...t,
+    title: t.name
+  }
+}
+
+function newTech() {
+  editModal.show = true
+  editModal.title = '添加追踪技术'
+  editModal.type = 'tech'
+  editModal.id = 0
+  editModal.data = {
+    title: '',
+    category: '',
+    githubRepo: '',
+    officialUrl: '',
+    rssUrl: '',
+    status: 'ACTIVE'
+  }
+}
+
+async function deleteTech(id: number) {
+  if (!confirm('确认删除此技术？')) return
+  await api.delete(`/admin/techs/${id}`)
+  await loadTrackedTechs()
+}
+
+async function updateTechStatus(id: number, status: string) {
+  await api.put(`/admin/techs/${id}`, { status })
+  await loadTrackedTechs()
 }
 
 async function addCategory() {
@@ -375,5 +580,24 @@ function errataStatusColor(s: string) {
 function formatDate(date: string) {
   if (!date) return ''
   return new Date(date).toLocaleDateString('zh-CN')
+}
+
+async function viewUserSessions(userId: number, userName: string) {
+  sessionModal.userId = userId
+  sessionModal.userName = userName
+  try {
+    const res: any = await api.get(`/admin/users/${userId}/sessions`)
+    sessionModal.sessions = res.data || []
+    sessionModal.show = true
+  } catch { /* ignore */ }
+}
+
+async function deleteUserSession(sessionId: number) {
+  if (!confirm('确认删除此会话？')) return
+  try {
+    await api.delete(`/admin/users/${sessionModal.userId}/sessions/${sessionId}`)
+    const res: any = await api.get(`/admin/users/${sessionModal.userId}/sessions`)
+    sessionModal.sessions = res.data || []
+  } catch { /* ignore */ }
 }
 </script>

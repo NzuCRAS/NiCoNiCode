@@ -75,6 +75,7 @@ public class KnowledgeService {
         doc.setTitle(req.getTitle());
         doc.setContent(req.getContent());
         doc.setTags(req.getTags());
+        doc.setCategoryId(req.getCategoryId());
         docMapper.updateById(doc);
 
         // 重新向量化

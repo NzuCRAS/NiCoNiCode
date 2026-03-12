@@ -51,7 +51,16 @@ public class ChatController {
     @PostMapping("/sessions")
     public R<ChatSession> createSession(Authentication auth) {
         Long userId = (Long) auth.getPrincipal();
-        ChatSession session = memoryService.getOrCreateSession(userId, null, "新对话");
+        // 检查是否已经有未发送消息的会话，如果有则返回它
+        ChatSession session = memoryService.getExistingNewSession(userId);
+        if (session != null) {
+            return R.ok(session);
+        }
+        // 否则创建新会话
+        session = new ChatSession();
+        session.setUserId(userId);
+        session.setTitle("新对话");
+        memoryService.createNewSession(session);
         return R.ok(session);
     }
 

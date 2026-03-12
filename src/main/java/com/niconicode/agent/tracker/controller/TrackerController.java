@@ -25,6 +25,14 @@ public class TrackerController {
         return R.ok(trackerService.listReports(page, size, categoryId));
     }
 
+    @GetMapping("/reports/by-score")
+    public R<Page<TechReport>> listReportsByScore(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int size,
+            @RequestParam(required = false) Long categoryId) {
+        return R.ok(trackerService.listReportsByScore(page, size, categoryId));
+    }
+
     @GetMapping("/reports/{id}")
     public R<TechReport> getReport(@PathVariable Long id) {
         return R.ok(trackerService.getReport(id));
@@ -54,6 +62,14 @@ public class TrackerController {
     @PostMapping("/check-now/{id}")
     public R<Void> checkNow(@PathVariable Long id) {
         trackerService.checkTechUpdate(id);
+        return R.ok();
+    }
+
+    @PostMapping("/reports/{id}/save-to-knowledge")
+    public R<Void> saveReportAsKnowledge(
+            @PathVariable Long id,
+            @RequestParam(required = false) Long categoryId) {
+        trackerService.saveReportAsKnowledge(id, categoryId);
         return R.ok();
     }
 }

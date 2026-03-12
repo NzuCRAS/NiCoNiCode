@@ -26,7 +26,7 @@
           <span class="text-xs text-gray-400">{{ formatDate(report.publishedAt) }}</span>
         </div>
         <h3 class="font-semibold text-gray-900 mb-2">{{ report.title }}</h3>
-        <p class="text-sm text-gray-500 line-clamp-3">{{ stripMarkdown(report.changeSummary || report.content || '').substring(0, 150) }}</p>
+        <p class="text-sm text-gray-500 line-clamp-3">{{ stripMarkdown(report.content || '').substring(0, 150) }}</p>
       </router-link>
     </div>
     <!-- Pagination -->

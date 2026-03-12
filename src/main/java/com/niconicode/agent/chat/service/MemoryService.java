@@ -27,12 +27,71 @@ public class MemoryService {
                 return session;
             }
         }
+
+        // 检查是否存在未发送消息的新会话
+        ChatSession existingNewSession = getExistingNewSession(userId);
+        if (existingNewSession != null) {
+            return existingNewSession;
+        }
+
         // 创建新会话
         ChatSession session = new ChatSession();
         session.setUserId(userId);
-        session.setTitle(firstMessage.length() > 50 ? firstMessage.substring(0, 50) + "..." : firstMessage);
+        session.setTitle("新对话");  // 初始标题，第一次回答后会更新
         sessionMapper.insert(session);
         return session;
+    }
+
+    /**
+     * 获取用户现有的未发送消息的新会话
+     * 返回有0条消息的最近创建的会话
+     */
+    public ChatSession getExistingNewSession(Long userId) {
+        List<ChatSession> sessions = sessionMapper.selectList(
+                new LambdaQueryWrapper<ChatSession>()
+                        .eq(ChatSession::getUserId, userId)
+                        .orderByDesc(ChatSession::getCreatedAt)
+        );
+
+        for (ChatSession session : sessions) {
+            long messageCount = messageMapper.selectCount(
+                    new LambdaQueryWrapper<ChatMessage>()
+                            .eq(ChatMessage::getSessionId, session.getId())
+            );
+            if (messageCount == 0) {
+                return session;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 更新会话标题
+     */
+    public void updateSessionTitle(Long sessionId, String newTitle) {
+        ChatSession session = sessionMapper.selectById(sessionId);
+        if (session != null) {
+            session.setTitle(newTitle);
+            sessionMapper.updateById(session);
+        }
+    }
+
+    /**
+     * 创建新会话
+     */
+    public void createNewSession(ChatSession session) {
+        sessionMapper.insert(session);
+    }
+
+    /**
+     * 直接获取会话的所有消息（不验证userId）
+     */
+    public List<ChatMessage> getSessionMessagesDirectly(Long sessionId) {
+        return messageMapper.selectList(
+                new LambdaQueryWrapper<ChatMessage>()
+                        .eq(ChatMessage::getSessionId, sessionId)
+                        .orderByAsc(ChatMessage::getCreatedAt)
+        );
     }
 
     public List<ChatMessage> getRecentMessages(Long sessionId) {

@@ -8,7 +8,9 @@
         <span v-if="report.newVersion" class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
           {{ report.newVersion }}
         </span>
-        <span>{{ formatDate(report.publishedAt) }}</span>
+        <span v-if="report.publishedAt">发布: {{ formatDate(report.publishedAt) }}</span>
+        <span v-if="report.createdAt && report.createdAt !== report.publishedAt">创建: {{ formatDate(report.createdAt) }}</span>
+        <span v-if="report.updatedAt && report.updatedAt !== report.publishedAt">更新: {{ formatDate(report.updatedAt) }}</span>
       </div>
       <div class="markdown-body" v-html="renderedContent"></div>
     </article>
@@ -16,8 +18,7 @@
     <!-- 勘误区 -->
     <section v-if="report" class="mt-8 bg-white p-6 rounded-xl border border-gray-200">
       <h2 class="text-lg font-semibold mb-4">勘误</h2>
-      <div v-if="errataList.length === 0" class="text-sm text-gray-400 mb-4">暂无勘误</div>
-      <div v-else class="space-y-3 mb-4">
+      <div v-if="errataList.length > 0" class="space-y-3 mb-4">
         <div v-for="e in errataList" :key="e.id" class="border border-gray-100 rounded-lg p-3">
           <div class="flex items-center space-x-2 mb-1">
             <span class="text-sm font-medium text-gray-700">{{ e.userNickname }}</span>
@@ -28,7 +29,7 @@
           <p v-if="e.adminNote" class="text-xs text-gray-400 mt-1">管理员备注: {{ e.adminNote }}</p>
         </div>
       </div>
-      <div v-if="userStore.isLoggedIn" class="border-t pt-4">
+      <div v-if="userStore.isLoggedIn" :class="[errataList.length > 0 ? 'border-t pt-4' : '']">
         <textarea v-model="errataContent" rows="3" placeholder="提交勘误内容..."
           class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"></textarea>
         <button @click="submitErrata" :disabled="!errataContent.trim() || submitting"
@@ -36,7 +37,7 @@
           {{ submitting ? '提交中...' : '提交勘误' }}
         </button>
       </div>
-      <p v-else class="text-sm text-gray-400 border-t pt-4">
+      <p v-else :class="[errataList.length > 0 ? 'border-t pt-4' : '', 'text-sm text-gray-400']">
         <router-link to="/login" class="text-primary hover:underline">登录</router-link> 后可提交勘误
       </p>
     </section>

@@ -126,10 +126,14 @@ INSERT INTO `category` (`name`, `description`, `sort_order`) VALUES
 ('AI', '人工智能与机器学习', 7)
 ON DUPLICATE KEY UPDATE `name` = VALUES(`name`);
 
--- tech_report 添加分类字段
-ALTER TABLE `tech_report` ADD COLUMN IF NOT EXISTS `category_id` BIGINT DEFAULT NULL;
+-- tech_report 添加分类字段（如果列已存在会报错，可以忽略）
+ALTER TABLE `tech_report` ADD COLUMN `category_id` BIGINT DEFAULT NULL;
+-- tech_report 添加更新时间字段
+ALTER TABLE `tech_report` ADD COLUMN `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;
+-- tech_report 添加技术指数字段
+ALTER TABLE `tech_report` ADD COLUMN `tech_index` INT DEFAULT 0 COMMENT '技术指数 (0-1000)';
 -- knowledge_doc 添加分类字段
-ALTER TABLE `knowledge_doc` ADD COLUMN IF NOT EXISTS `category_id` BIGINT DEFAULT NULL;
+ALTER TABLE `knowledge_doc` ADD COLUMN `category_id` BIGINT DEFAULT NULL;
 
 -- 勘误表
 CREATE TABLE IF NOT EXISTS `errata` (

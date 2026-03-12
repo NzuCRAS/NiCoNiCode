@@ -18,6 +18,8 @@ public class TechReport {
     private String sourceUrls;  // JSON array
     private Long categoryId;
     private String status;      // DRAFT, PUBLISHED
+    private Integer techIndex;  // 技术指数 (0-1000)
     private LocalDateTime publishedAt;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }
