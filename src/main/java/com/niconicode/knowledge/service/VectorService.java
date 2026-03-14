@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
@@ -21,6 +22,9 @@ public class VectorService {
     private final String qdrantUrl;
     private final String collectionName;
 
+    @Value("${qdrant.vector-dimension:1024}")
+    private int vectorDimension;
+
     public VectorService(RestTemplate restTemplate,
                          @Value("${qdrant.url}") String qdrantUrl,
                          @Value("${qdrant.collection-name}") String collectionName) {
@@ -28,6 +32,11 @@ public class VectorService {
         this.objectMapper = new ObjectMapper();
         this.qdrantUrl = qdrantUrl;
         this.collectionName = collectionName;
+    }
+
+    @PostConstruct
+    public void init() {
+        ensureCollection(vectorDimension);
     }
 
     public void ensureCollection(int dimension) {

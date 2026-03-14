@@ -15,6 +15,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/chat")
@@ -51,12 +52,10 @@ public class ChatController {
     @PostMapping("/sessions")
     public R<ChatSession> createSession(Authentication auth) {
         Long userId = (Long) auth.getPrincipal();
-        // 检查是否已经有未发送消息的会话，如果有则返回它
         ChatSession session = memoryService.getExistingNewSession(userId);
         if (session != null) {
             return R.ok(session);
         }
-        // 否则创建新会话
         session = new ChatSession();
         session.setUserId(userId);
         session.setTitle("新对话");
@@ -68,6 +67,37 @@ public class ChatController {
     public R<Void> deleteSession(@PathVariable Long id, Authentication auth) {
         Long userId = (Long) auth.getPrincipal();
         memoryService.deleteSession(id, userId);
+        return R.ok();
+    }
+
+    @DeleteMapping("/messages/{id}")
+    public R<Void> deleteMessage(@PathVariable Long id, Authentication auth) {
+        Long userId = (Long) auth.getPrincipal();
+        memoryService.deleteMessage(id, userId);
+        return R.ok();
+    }
+
+    @DeleteMapping("/sessions/{sessionId}/messages/after/{messageId}")
+    public R<Void> deleteMessagesAfter(@PathVariable Long sessionId, @PathVariable Long messageId, Authentication auth) {
+        Long userId = (Long) auth.getPrincipal();
+        memoryService.deleteMessagesAfter(sessionId, messageId, userId);
+        return R.ok();
+    }
+
+    @PutMapping("/messages/{id}")
+    public R<Void> updateMessage(@PathVariable Long id, @RequestBody Map<String, String> body, Authentication auth) {
+        Long userId = (Long) auth.getPrincipal();
+        memoryService.updateMessage(id, body.get("content"), userId);
+        return R.ok();
+    }
+
+    @PostMapping("/stream/cancel")
+    public R<Void> cancelStream(@RequestBody Map<String, Long> body, Authentication auth) {
+        Long userId = (Long) auth.getPrincipal();
+        Long sessionId = body.get("sessionId");
+        if (sessionId != null) {
+            chatService.cancelStream(sessionId, userId);
+        }
         return R.ok();
     }
 }

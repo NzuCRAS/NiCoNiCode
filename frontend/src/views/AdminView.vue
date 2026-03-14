@@ -82,6 +82,23 @@
 
     <!-- 追踪技术管理 -->
     <div v-if="activeTab === 'techs'">
+      <!-- 频率控制区域 -->
+      <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4 flex items-center space-x-4">
+        <span class="text-sm font-medium text-blue-700">追踪频率：</span>
+        <select v-model.number="trackerFrequency" @change="updateFrequency"
+          class="border border-blue-300 rounded px-3 py-1.5 text-sm bg-white">
+          <option :value="30">30分钟</option>
+          <option :value="60">1小时</option>
+          <option :value="180">3小时</option>
+          <option :value="360">6小时</option>
+          <option :value="720">12小时</option>
+          <option :value="1440">24小时</option>
+        </select>
+        <button @click="checkNow" :disabled="checkingNow"
+          class="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700 disabled:opacity-50 transition">
+          {{ checkingNow ? '检查中...' : '立即检查' }}
+        </button>
+      </div>
       <div class="flex space-x-2 mb-4">
         <button @click="newTech" class="bg-primary text-white px-4 py-1.5 rounded text-sm hover:bg-primary-dark">+ 添加技术</button>
       </div>
@@ -93,6 +110,7 @@
             <th class="text-left px-4 py-2">GitHub仓库</th>
             <th class="text-left px-4 py-2">官网</th>
             <th class="text-left px-4 py-2">RSS源</th>
+            <th class="text-left px-4 py-2">追踪模式</th>
             <th class="text-left px-4 py-2">状态</th>
             <th class="text-left px-4 py-2">操作</th>
           </tr>
@@ -104,6 +122,13 @@
             <td class="px-4 py-2 text-xs">{{ t.githubRepo }}</td>
             <td class="px-4 py-2 text-xs truncate">{{ t.officialUrl }}</td>
             <td class="px-4 py-2 text-xs truncate">{{ t.rssUrl }}</td>
+            <td class="px-4 py-2">
+              <span :class="{
+                'text-green-600': t.trackingMode === 'RELEASE' || !t.trackingMode,
+                'text-blue-600': t.trackingMode === 'TAG',
+                'text-purple-600': t.trackingMode === 'COMMIT'
+              }" class="text-xs font-medium">{{ t.trackingMode || 'RELEASE' }}</span>
+            </td>
             <td class="px-4 py-2">
               <select :value="t.status" @change="updateTechStatus(t.id, ($event.target as HTMLSelectElement).value)"
                 class="border rounded px-2 py-0.5 text-xs">
@@ -249,6 +274,21 @@
                 </select>
               </div>
             </div>
+            <!-- 报道专属：关联技术 + 技术指数 -->
+            <div v-if="editModal.type === 'report'" class="flex space-x-3 mt-3">
+              <div class="flex-1">
+                <label class="text-sm text-gray-600">关联技术</label>
+                <select v-model="editModal.data.trackedTechId" class="w-full border rounded px-3 py-2 text-sm">
+                  <option :value="null">无关联</option>
+                  <option v-for="t in trackedTechs" :key="t.id" :value="t.id">{{ t.name }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-sm text-gray-600">技术指数 (0-1000)</label>
+                <input v-model.number="editModal.data.techIndex" type="number" min="0" max="1000"
+                  class="w-full border rounded px-3 py-2 text-sm" placeholder="500" />
+              </div>
+            </div>
           </div>
 
           <!-- 追踪技术字段 -->
@@ -272,6 +312,14 @@
             <div>
               <label class="text-sm text-gray-600">RSS 源</label>
               <input v-model="editModal.data.rssUrl" type="url" class="w-full border rounded px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label class="text-sm text-gray-600">追踪模式</label>
+              <select v-model="editModal.data.trackingMode" class="w-full border rounded px-3 py-2 text-sm">
+                <option value="RELEASE">RELEASE (GitHub Release)</option>
+                <option value="TAG">TAG (Git 标签)</option>
+                <option value="COMMIT">COMMIT (最新提交)</option>
+              </select>
             </div>
             <div>
               <label class="text-sm text-gray-600">状态</label>
@@ -341,6 +389,8 @@ const users = ref<any[]>([])
 const reportFilter = reactive({ status: '' })
 const errataFilter = reactive({ status: '' })
 const newCategory = reactive({ name: '', description: '', sortOrder: 0 })
+const trackerFrequency = ref(360)
+const checkingNow = ref(false)
 
 const editModal = reactive({
   show: false,
@@ -392,6 +442,27 @@ async function loadTrackedTechs() {
     const res: any = await api.get('/admin/techs')
     trackedTechs.value = res.data || []
   } catch { /* ignore */ }
+  // 同时加载频率
+  try {
+    const res: any = await api.get('/admin/tracker/frequency')
+    trackerFrequency.value = res.data?.minutes || 360
+  } catch { /* ignore */ }
+}
+
+async function updateFrequency() {
+  try {
+    await api.put('/admin/tracker/frequency', { minutes: trackerFrequency.value })
+  } catch { /* ignore */ }
+}
+
+async function checkNow() {
+  checkingNow.value = true
+  try {
+    await api.post('/admin/tracker/check-now')
+  } catch { /* ignore */ }
+  finally {
+    setTimeout(() => { checkingNow.value = false }, 3000)
+  }
 }
 
 async function loadCategories() {
@@ -422,7 +493,8 @@ function editReport(r: any) {
   editModal.title = '编辑报道'
   editModal.type = 'report'
   editModal.id = r.id
-  editModal.data = { title: r.title, content: r.content, categoryId: r.categoryId, status: r.status }
+  editModal.data = { title: r.title, content: r.content, categoryId: r.categoryId, trackedTechId: r.trackedTechId, techIndex: r.techIndex, status: r.status }
+  loadTrackedTechs()
 }
 
 function newReport() {
@@ -430,7 +502,8 @@ function newReport() {
   editModal.title = '发布新报道'
   editModal.type = 'report'
   editModal.id = 0
-  editModal.data = { title: '', content: '', categoryId: null, status: 'DRAFT' }
+  editModal.data = { title: '', content: '', categoryId: null, trackedTechId: null, techIndex: 500, status: 'DRAFT' }
+  loadTrackedTechs()
 }
 
 function editKnowledge(d: any) {
@@ -454,10 +527,18 @@ async function saveEdit() {
     if (editModal.type === 'report') {
       if (editModal.id === 0) {
         // 新建报道
-        await api.post('/admin/reports', editModal.data)
+        await api.post('/admin/reports', {
+          ...editModal.data,
+          trackedTechId: editModal.data.trackedTechId || null,
+          techIndex: editModal.data.techIndex ?? 500
+        })
       } else {
         // 编辑报道
-        await api.put(`/admin/reports/${editModal.id}`, editModal.data)
+        await api.put(`/admin/reports/${editModal.id}`, {
+          ...editModal.data,
+          trackedTechId: editModal.data.trackedTechId || null,
+          techIndex: editModal.data.techIndex ?? 500
+        })
       }
       await loadReports()
     } else if (editModal.type === 'knowledge') {
@@ -476,6 +557,7 @@ async function saveEdit() {
         githubRepo: editModal.data.githubRepo,
         officialUrl: editModal.data.officialUrl,
         rssUrl: editModal.data.rssUrl,
+        trackingMode: editModal.data.trackingMode,
         status: editModal.data.status
       }
       if (editModal.id === 0) {
@@ -525,6 +607,7 @@ function newTech() {
     githubRepo: '',
     officialUrl: '',
     rssUrl: '',
+    trackingMode: 'RELEASE',
     status: 'ACTIVE'
   }
 }

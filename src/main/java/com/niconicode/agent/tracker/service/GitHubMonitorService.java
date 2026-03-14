@@ -2,12 +2,16 @@ package com.niconicode.agent.tracker.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+
+import java.util.ArrayList;
+import java.util.List;
 
 @Slf4j
 @Service
@@ -90,5 +94,95 @@ public class GitHubMonitorService {
             fallback.setPublishedAt("");
             return fallback;
         }
+    }
+
+    /**
+     * 检查最新 Tag（用于无 Release 的仓库）
+     * @return 最新 tag name，或 null 如果没有变化
+     */
+    public String checkLatestTag(String repo, String lastKnownVersion) {
+        String url = githubBaseUrl + "/repos/" + repo + "/tags?per_page=1";
+        try {
+            ResponseEntity<String> resp = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
+
+            JsonNode body = objectMapper.readTree(resp.getBody());
+            if (!body.isArray() || body.isEmpty()) return null;
+
+            String tagName = body.get(0).get("name").asText();
+            if (lastKnownVersion != null && lastKnownVersion.equals(tagName)) {
+                return null;
+            }
+            return tagName;
+        } catch (Exception e) {
+            log.warn("Failed to check tags for {}: {}", repo, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 检查最新 Commit
+     * @return GitHubCommitInfo，或 null 如果没有变化
+     */
+    public GitHubCommitInfo checkLatestCommit(String repo, String lastKnownSha) {
+        String url = githubBaseUrl + "/repos/" + repo + "/commits?per_page=1";
+        try {
+            ResponseEntity<String> resp = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
+
+            JsonNode body = objectMapper.readTree(resp.getBody());
+            if (!body.isArray() || body.isEmpty()) return null;
+
+            JsonNode node = body.get(0);
+            String sha = node.get("sha").asText();
+            if (lastKnownSha != null && lastKnownSha.equals(sha)) {
+                return null;
+            }
+
+            return parseCommitNode(node);
+        } catch (Exception e) {
+            log.warn("Failed to check commits for {}: {}", repo, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 获取指定日期之后的 Commit 列表
+     */
+    public List<GitHubCommitInfo> getCommitsSince(String repo, String sinceDate, int perPage) {
+        String url = githubBaseUrl + "/repos/" + repo + "/commits?since=" + sinceDate + "&per_page=" + perPage;
+        try {
+            ResponseEntity<String> resp = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
+
+            JsonNode body = objectMapper.readTree(resp.getBody());
+            List<GitHubCommitInfo> commits = new ArrayList<>();
+            if (body.isArray()) {
+                for (JsonNode node : body) {
+                    commits.add(parseCommitNode(node));
+                }
+            }
+            return commits;
+        } catch (Exception e) {
+            log.warn("Failed to get commits since {} for {}: {}", sinceDate, repo, e.getMessage());
+            return List.of();
+        }
+    }
+
+    private GitHubCommitInfo parseCommitNode(JsonNode node) {
+        GitHubCommitInfo info = new GitHubCommitInfo();
+        info.setSha(node.get("sha").asText());
+        info.setHtmlUrl(node.has("html_url") ? node.get("html_url").asText() : "");
+
+        JsonNode commit = node.get("commit");
+        if (commit != null) {
+            info.setMessage(commit.has("message") ? commit.get("message").asText() : "");
+            JsonNode author = commit.get("author");
+            if (author != null) {
+                info.setAuthorName(author.has("name") ? author.get("name").asText() : "");
+                info.setDate(author.has("date") ? author.get("date").asText() : "");
+            }
+        }
+        return info;
     }
 }

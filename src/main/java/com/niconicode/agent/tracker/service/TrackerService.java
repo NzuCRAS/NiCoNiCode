@@ -2,6 +2,7 @@ package com.niconicode.agent.tracker.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
 import com.niconicode.agent.tracker.entity.HotTopic;
 import com.niconicode.agent.tracker.entity.TechReport;
@@ -9,12 +10,18 @@ import com.niconicode.agent.tracker.entity.TrackedTech;
 import com.niconicode.agent.tracker.mapper.HotTopicMapper;
 import com.niconicode.agent.tracker.mapper.TechReportMapper;
 import com.niconicode.agent.tracker.mapper.TrackedTechMapper;
+import com.niconicode.agent.tracker.agent.SearchAgent;
+import com.niconicode.agent.tracker.agent.WriterAgent;
+import com.niconicode.agent.tracker.agent.ReviewerAgent;
 import com.niconicode.common.exception.BusinessException;
 import com.niconicode.knowledge.dto.KnowledgeDocReq;
+import com.niconicode.knowledge.entity.KnowledgeDoc;
+import com.niconicode.knowledge.mapper.KnowledgeDocMapper;
 import com.niconicode.knowledge.service.KnowledgeService;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -30,9 +37,16 @@ public class TrackerService {
     private final TrackedTechMapper techMapper;
     private final TechReportMapper reportMapper;
     private final HotTopicMapper hotTopicMapper;
+    private final KnowledgeDocMapper knowledgeDocMapper;
     private final GitHubMonitorService githubMonitor;
     private final KnowledgeService knowledgeService;
     private final ChatLanguageModel chatModel;
+    private final SearchAgent searchAgent;
+    private final WriterAgent writerAgent;
+    private final ReviewerAgent reviewerAgent;
+
+    @Value("${ai.hot-topic.promotion-threshold:10}")
+    private int promotionThreshold;
 
     public Page<TechReport> listReports(int page, int size, Long categoryId) {
         LambdaQueryWrapper<TechReport> wrapper = new LambdaQueryWrapper<TechReport>()
@@ -150,6 +164,8 @@ public class TrackerService {
         if (updated.getTitle() != null) report.setTitle(updated.getTitle());
         if (updated.getContent() != null) report.setContent(updated.getContent());
         if (updated.getCategoryId() != null) report.setCategoryId(updated.getCategoryId());
+        if (updated.getTrackedTechId() != null) report.setTrackedTechId(updated.getTrackedTechId());
+        if (updated.getTechIndex() != null) report.setTechIndex(updated.getTechIndex());
         if (updated.getStatus() != null) report.setStatus(updated.getStatus());
         reportMapper.updateById(report);
         return report;
@@ -192,103 +208,131 @@ public class TrackerService {
         if (tech.getGithubRepo() != null) existing.setGithubRepo(tech.getGithubRepo());
         if (tech.getOfficialUrl() != null) existing.setOfficialUrl(tech.getOfficialUrl());
         if (tech.getRssUrl() != null) existing.setRssUrl(tech.getRssUrl());
+        if (tech.getTrackingMode() != null) existing.setTrackingMode(tech.getTrackingMode());
         if (tech.getStatus() != null) existing.setStatus(tech.getStatus());
         techMapper.updateById(existing);
         return existing;
     }
 
     /**
-     * 检查单个技术的更新
+     * 检查单个技术的更新 — Multi-Agent 流水线
+     * SearchAgent → WriterAgent → ReviewerAgent → 发布
      */
     public void checkTechUpdate(Long techId) {
         TrackedTech tech = techMapper.selectById(techId);
         if (tech == null || !"ACTIVE".equals(tech.getStatus())) return;
 
-        // 检查 GitHub Release
-        if (tech.getGithubRepo() != null && !tech.getGithubRepo().isBlank()) {
-            String newVersion = githubMonitor.checkLatestRelease(tech.getGithubRepo(), tech.getLastKnownVersion());
-            if (newVersion != null) {
-                log.info("New version detected for {}: {}", tech.getName(), newVersion);
-                GitHubReleaseInfo releaseInfo = githubMonitor.getFullReleaseInfo(tech.getGithubRepo(), newVersion);
-                generateReport(tech, newVersion, releaseInfo);
-                tech.setLastKnownVersion(newVersion);
+        if (tech.getGithubRepo() == null || tech.getGithubRepo().isBlank()) return;
+
+        try {
+            // Stage 1: SearchAgent — 多渠道信息搜集
+            SearchAgent.SearchResult searchResult = searchAgent.search(tech);
+            if (!searchResult.isHasUpdate()) {
+                log.debug("No update detected for {}", tech.getName());
+                tech.setLastCheckedAt(LocalDateTime.now());
+                techMapper.updateById(tech);
+                return;
             }
+
+            log.info("Update detected for {} ({} mode): {}",
+                    tech.getName(), searchResult.getUpdateMode(), searchResult.getDetectedVersion());
+
+            // Stage 2: WriterAgent — 撰写高质量报道
+            String reportContent = writerAgent.write(tech, searchResult);
+
+            // Stage 3: ReviewerAgent — 审核 + 评分 + 发布决策
+            ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, reportContent, searchResult);
+
+            if (review.isApproved()) {
+                // 构建并发布报道
+                TechReport report = new TechReport();
+                report.setTrackedTechId(tech.getId());
+                report.setTitle(tech.getName() + " " + searchResult.getDetectedVersion() + " "
+                        + getModeLabel(searchResult.getUpdateMode()));
+                report.setContent(review.getRevisedContent());
+                report.setNewVersion(searchResult.getDetectedVersion());
+                report.setChangeSummary(
+                        searchResult.getRawInfoSummary() != null
+                                ? searchResult.getRawInfoSummary().substring(0,
+                                    Math.min(500, searchResult.getRawInfoSummary().length()))
+                                : "");
+                report.setSourceUrls(buildSourceUrlsJson(searchResult));
+                report.setStatus("PUBLISHED");
+                report.setTechIndex(review.getTechIndex());
+                report.setPublishedAt(LocalDateTime.now());
+                reportMapper.insert(report);
+
+                // 同步到知识库
+                syncToKnowledge(report, tech);
+
+                log.info("Published report for {} {} (tech index: {}, quality: {})",
+                        tech.getName(), searchResult.getDetectedVersion(),
+                        review.getTechIndex(), review.getQualityNotes());
+            } else {
+                log.info("Report for {} rejected by ReviewerAgent: {}",
+                        tech.getName(), review.getRejectionReason());
+            }
+
+            // 更新追踪状态
+            updateTrackingState(tech, searchResult);
+
+        } catch (Exception e) {
+            log.error("Multi-agent pipeline failed for {}", tech.getName(), e);
         }
 
         tech.setLastCheckedAt(LocalDateTime.now());
         techMapper.updateById(tech);
     }
 
-    private void generateReport(TrackedTech tech, String newVersion, GitHubReleaseInfo releaseInfo) {
-        String releaseNotes = releaseInfo.getBody() != null ? releaseInfo.getBody() : "";
-        String publishedAt = releaseInfo.getPublishedAt() != null ? releaseInfo.getPublishedAt() : "";
-        String releaseUrl = releaseInfo.getHtmlUrl() != null ? releaseInfo.getHtmlUrl() : "";
+    private String getModeLabel(String mode) {
+        return switch (mode) {
+            case "RELEASE" -> "发布";
+            case "TAG" -> "发布 (Tag)";
+            case "COMMIT" -> "开发动态";
+            default -> "更新";
+        };
+    }
 
-        String prompt = """
-                你是一位资深技术新闻记者。请根据以下信息，用中文写一篇专业的技术更新报道（Markdown格式）。
+    private String buildSourceUrlsJson(SearchAgent.SearchResult searchResult) {
+        if (searchResult.getSourceUrls().isEmpty()) return "[]";
+        return searchResult.getSourceUrls().stream()
+                .map(url -> "\"" + url.replace("\"", "\\\"") + "\"")
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+    }
 
-                技术: %s
-                类别: %s
-                新版本: %s
-                发布日期: %s
-                Release 页面: %s
-                Release Notes:
-                %s
-
-                要求：
-                1. 标题要有吸引力，体现版本号和核心亮点
-                2. 文章结构清晰，分为以下几个部分：
-                   - **版本亮点**：概述 2-3 个最重要的新特性
-                   - **更新内容详解**：详细说明主要变更，把每个地方都讲清楚
-                   - **对开发者的影响**：分析这些变更对现有用户的意义
-                   - **升级建议**：给出升级注意事项
-                   - **来源链接**：附上 Release 页面链接
-                3. 要求内容充实完整，不要硬性限制字数，重点是讲清楚每处更新
-                4. 直接输出 Markdown 内容，不要用 ```markdown ``` 包裹
-                """.formatted(
-                tech.getName(), tech.getCategory(), newVersion, publishedAt, releaseUrl,
-                releaseNotes.length() > 3000 ? releaseNotes.substring(0, 3000) : releaseNotes);
-
+    private void syncToKnowledge(TechReport report, TrackedTech tech) {
         try {
-            String reportContent = chatModel.chat(prompt);
-            reportContent = cleanMarkdownContent(reportContent);
-
-            // 生成技术指数
-            int techIndex = generateTechIndex(tech.getName(), tech.getCategory(), reportContent);
-
-            TechReport report = new TechReport();
-            report.setTrackedTechId(tech.getId());
-            report.setTitle(tech.getName() + " " + newVersion + " 发布");
-            report.setContent(reportContent);
-            report.setNewVersion(newVersion);
-            report.setChangeSummary(releaseNotes.length() > 500 ? releaseNotes.substring(0, 500) : releaseNotes);
-            report.setSourceUrls("[\"" + releaseUrl.replace("\"", "\\\"") + "\"]");
-            report.setStatus("PUBLISHED");
-            report.setTechIndex(techIndex);
-            report.setPublishedAt(LocalDateTime.now());
-            reportMapper.insert(report);
-
-            // 同步到知识库
             KnowledgeDocReq docReq = new KnowledgeDocReq();
             docReq.setTitle(report.getTitle());
-            docReq.setContent(reportContent);
+            docReq.setContent(report.getContent());
             docReq.setSourceType("TRACKER_REPORT");
             docReq.setSourceId(report.getId());
             docReq.setTags(tech.getName() + "," + tech.getCategory());
             knowledgeService.createDoc(docReq);
-
-            log.info("Generated report for {} {} with tech index {}", tech.getName(), newVersion, techIndex);
         } catch (Exception e) {
-            log.error("Failed to generate report for {}", tech.getName(), e);
+            log.warn("Failed to sync report to knowledge base: {}", e.getMessage());
+        }
+    }
+
+    private void updateTrackingState(TrackedTech tech, SearchAgent.SearchResult searchResult) {
+        if ("RELEASE".equals(searchResult.getUpdateMode())
+                || "TAG".equals(searchResult.getUpdateMode())) {
+            tech.setLastKnownVersion(searchResult.getDetectedVersion());
+        }
+        if ("TAG".equals(searchResult.getUpdateMode())
+                && "RELEASE".equals(tech.getTrackingMode())) {
+            // Release 降级为 Tag
+            tech.setTrackingMode("TAG");
+        }
+        if ("COMMIT".equals(searchResult.getUpdateMode())
+                && !searchResult.getRecentCommits().isEmpty()) {
+            tech.setLastKnownCommitSha(searchResult.getRecentCommits().get(0).getSha());
         }
     }
 
     /**
      * 根据技术名称、分类和报道内容生成技术指数 (0-1000)
-     * 指数范围：
-     * - 0: 无人在意的小型开源项目的一次 README 更新
-     * - 500: 知名技术框架或工具的常规更新
-     * - 1000: 最前沿的大模型等顶级技术的版本迭代
+     * @deprecated 已被 ReviewerAgent.scoreTechIndex() 替代，保留用于手动创建报道
      */
     private int generateTechIndex(String techName, String category, String content) {
         String prompt = """
@@ -384,7 +428,7 @@ public class TrackerService {
     }
 
     /**
-     * 记录热点话题
+     * 记录热点话题，同时更新已追踪技术的提及计数
      */
     public void recordMention(String keyword) {
         HotTopic topic = hotTopicMapper.selectOne(
@@ -401,5 +445,159 @@ public class TrackerService {
             topic.setLastMentionedAt(LocalDateTime.now());
             hotTopicMapper.updateById(topic);
         }
+
+        // 同步更新已追踪技术的 mentionCount
+        TrackedTech trackedTech = techMapper.selectOne(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .like(TrackedTech::getName, keyword)
+                        .eq(TrackedTech::getStatus, "ACTIVE")
+                        .last("LIMIT 1"));
+        if (trackedTech != null) {
+            trackedTech.setMentionCount(
+                    (trackedTech.getMentionCount() != null ? trackedTech.getMentionCount() : 0) + 1);
+            techMapper.updateById(trackedTech);
+        }
+
+        // 检查是否需要自动晋级
+        checkAndPromote(topic);
+    }
+
+    /**
+     * 检查热点话题是否达到晋级阈值，自动创建追踪技术
+     */
+    private void checkAndPromote(HotTopic topic) {
+        if (topic.getPromotedToTracked() != null && topic.getPromotedToTracked()) {
+            return;
+        }
+        if (topic.getMentionCount() < promotionThreshold) {
+            return;
+        }
+
+        // 检查是否已有同名追踪技术
+        TrackedTech existing = techMapper.selectOne(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .eq(TrackedTech::getName, topic.getKeyword()));
+        if (existing != null) {
+            topic.setPromotedToTracked(true);
+            hotTopicMapper.updateById(topic);
+            return;
+        }
+
+        // 创建新追踪技术
+        TrackedTech newTech = new TrackedTech();
+        newTech.setName(topic.getKeyword());
+        newTech.setCategory("其他");
+        newTech.setStatus("ACTIVE");
+        newTech.setMentionCount(topic.getMentionCount());
+        newTech.setIsHot(true);
+        techMapper.insert(newTech);
+
+        topic.setPromotedToTracked(true);
+        hotTopicMapper.updateById(topic);
+
+        log.info("Hot topic '{}' promoted to tracked tech (mentions: {})", topic.getKeyword(), topic.getMentionCount());
+    }
+
+    /**
+     * 获取所有追踪技术名称列表（用于关键词匹配）
+     */
+    public List<String> getAllTechNames() {
+        return techMapper.selectList(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .eq(TrackedTech::getStatus, "ACTIVE")
+                        .select(TrackedTech::getName)
+        ).stream().map(TrackedTech::getName).collect(Collectors.toList());
+    }
+
+    /**
+     * 获取单个追踪技术
+     */
+    public TrackedTech getTrackedTech(Long id) {
+        TrackedTech tech = techMapper.selectById(id);
+        if (tech == null) throw new BusinessException(404, "技术不存在");
+        return tech;
+    }
+
+    /**
+     * 按技术ID获取已发布的报道列表
+     */
+    public Page<TechReport> getReportsByTechId(Long techId, int page, int size) {
+        LambdaQueryWrapper<TechReport> wrapper = new LambdaQueryWrapper<TechReport>()
+                .eq(TechReport::getTrackedTechId, techId)
+                .eq(TechReport::getStatus, "PUBLISHED")
+                .orderByDesc(TechReport::getPublishedAt);
+        return reportMapper.selectPage(new Page<>(page, size), wrapper);
+    }
+
+    /**
+     * 按关键词搜索已发布报道（title/content LIKE）
+     */
+    public List<TechReport> searchReports(String keyword, int limit) {
+        return reportMapper.selectList(
+                new LambdaQueryWrapper<TechReport>()
+                        .eq(TechReport::getStatus, "PUBLISHED")
+                        .and(w -> w.like(TechReport::getTitle, keyword)
+                                .or()
+                                .like(TechReport::getContent, keyword))
+                        .orderByDesc(TechReport::getPublishedAt)
+                        .last("LIMIT " + limit)
+        );
+    }
+
+    /**
+     * 按名称模糊匹配追踪技术
+     */
+    public TrackedTech findTechByName(String name) {
+        return techMapper.selectOne(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .like(TrackedTech::getName, name)
+                        .eq(TrackedTech::getStatus, "ACTIVE")
+                        .last("LIMIT 1")
+        );
+    }
+
+    /**
+     * 按技术ID获取关联的知识文档
+     * 双通道：1) sourceType=TRACKER_REPORT 且 sourceId 对应该技术的报道
+     *         2) tags 包含技术名称
+     */
+    public List<KnowledgeDoc> getKnowledgeByTechId(Long techId) {
+        TrackedTech tech = techMapper.selectById(techId);
+        if (tech == null) return List.of();
+
+        // 获取该技术所有报道的 ID
+        List<TechReport> reports = reportMapper.selectList(
+                new LambdaQueryWrapper<TechReport>()
+                        .eq(TechReport::getTrackedTechId, techId)
+                        .select(TechReport::getId)
+        );
+        List<Long> reportIds = reports.stream().map(TechReport::getId).collect(Collectors.toList());
+
+        // 通道1: 通过 sourceId 关联
+        List<KnowledgeDoc> docs = new ArrayList<>();
+        if (!reportIds.isEmpty()) {
+            docs.addAll(knowledgeDocMapper.selectList(
+                    new LambdaQueryWrapper<KnowledgeDoc>()
+                            .eq(KnowledgeDoc::getSourceType, "TRACKER_REPORT")
+                            .in(KnowledgeDoc::getSourceId, reportIds)
+                            .eq(KnowledgeDoc::getStatus, "ACTIVE")
+            ));
+        }
+
+        // 通道2: 通过 tags 模糊匹配技术名称
+        List<KnowledgeDoc> tagDocs = knowledgeDocMapper.selectList(
+                new LambdaQueryWrapper<KnowledgeDoc>()
+                        .like(KnowledgeDoc::getTags, tech.getName())
+                        .eq(KnowledgeDoc::getStatus, "ACTIVE")
+        );
+
+        // 合并去重
+        for (KnowledgeDoc doc : tagDocs) {
+            if (docs.stream().noneMatch(d -> d.getId().equals(doc.getId()))) {
+                docs.add(doc);
+            }
+        }
+
+        return docs;
     }
 }

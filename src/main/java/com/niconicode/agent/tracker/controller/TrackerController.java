@@ -5,6 +5,7 @@ import com.niconicode.agent.tracker.entity.TechReport;
 import com.niconicode.agent.tracker.entity.TrackedTech;
 import com.niconicode.agent.tracker.service.TrackerService;
 import com.niconicode.common.result.R;
+import com.niconicode.knowledge.entity.KnowledgeDoc;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -46,6 +47,24 @@ public class TrackerController {
     @GetMapping("/techs")
     public R<List<TrackedTech>> listTechs() {
         return R.ok(trackerService.listTrackedTechs());
+    }
+
+    @GetMapping("/techs/{id}")
+    public R<TrackedTech> getTech(@PathVariable Long id) {
+        return R.ok(trackerService.getTrackedTech(id));
+    }
+
+    @GetMapping("/techs/{id}/reports")
+    public R<Page<TechReport>> getTechReports(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int size) {
+        return R.ok(trackerService.getReportsByTechId(id, page, size));
+    }
+
+    @GetMapping("/techs/{id}/knowledge")
+    public R<List<KnowledgeDoc>> getTechKnowledge(@PathVariable Long id) {
+        return R.ok(trackerService.getKnowledgeByTechId(id));
     }
 
     @PostMapping("/techs")

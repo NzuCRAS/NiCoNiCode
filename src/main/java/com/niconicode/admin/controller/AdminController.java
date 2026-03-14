@@ -6,6 +6,7 @@ import com.niconicode.admin.dto.TechReportUpdateReq;
 import com.niconicode.admin.dto.UserUpdateReq;
 import com.niconicode.agent.tracker.entity.TechReport;
 import com.niconicode.agent.tracker.entity.TrackedTech;
+import com.niconicode.agent.tracker.scheduler.TrackingScheduler;
 import com.niconicode.agent.tracker.service.TrackerService;
 import com.niconicode.auth.entity.User;
 import com.niconicode.auth.mapper.UserMapper;
@@ -24,6 +25,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/admin")
@@ -31,6 +33,7 @@ import java.util.List;
 public class AdminController {
 
     private final TrackerService trackerService;
+    private final TrackingScheduler trackingScheduler;
     private final KnowledgeService knowledgeService;
     private final KnowledgeDocMapper knowledgeDocMapper;
     private final ErrataService errataService;
@@ -54,6 +57,8 @@ public class AdminController {
         report.setTitle(req.getTitle());
         report.setContent(req.getContent());
         report.setCategoryId(req.getCategoryId());
+        report.setTrackedTechId(req.getTrackedTechId());
+        report.setTechIndex(req.getTechIndex() != null ? req.getTechIndex() : 500);
         report.setStatus(req.getStatus() != null ? req.getStatus() : "DRAFT");
         report.setPublishedAt(java.time.LocalDateTime.now());
         return R.ok(trackerService.createReport(report));
@@ -65,6 +70,8 @@ public class AdminController {
         updated.setTitle(req.getTitle());
         updated.setContent(req.getContent());
         updated.setCategoryId(req.getCategoryId());
+        updated.setTrackedTechId(req.getTrackedTechId());
+        updated.setTechIndex(req.getTechIndex());
         updated.setStatus(req.getStatus());
         return R.ok(trackerService.updateReport(id, updated));
     }
@@ -145,6 +152,7 @@ public class AdminController {
         tech.setGithubRepo(req.getGithubRepo());
         tech.setOfficialUrl(req.getOfficialUrl());
         tech.setRssUrl(req.getRssUrl());
+        tech.setTrackingMode(req.getTrackingMode());
         tech.setStatus(req.getStatus());
         return R.ok(trackerService.updateTrackedTech(id, tech));
     }
@@ -187,6 +195,29 @@ public class AdminController {
     @DeleteMapping("/users/{userId}/sessions/{sessionId}")
     public R<Void> deleteUserSession(@PathVariable Long userId, @PathVariable Long sessionId) {
         memoryService.deleteSession(sessionId, userId);
+        return R.ok();
+    }
+
+    // ===== 追踪频率管理 =====
+
+    @GetMapping("/tracker/frequency")
+    public R<Map<String, Object>> getTrackerFrequency() {
+        return R.ok(Map.of("minutes", trackingScheduler.getIntervalMinutes()));
+    }
+
+    @PutMapping("/tracker/frequency")
+    public R<Void> setTrackerFrequency(@RequestBody Map<String, Long> body) {
+        Long minutes = body.get("minutes");
+        if (minutes == null || minutes < 30) {
+            return R.fail(400, "最小间隔为30分钟");
+        }
+        trackingScheduler.reschedule(minutes);
+        return R.ok();
+    }
+
+    @PostMapping("/tracker/check-now")
+    public R<Void> checkNow() {
+        new Thread(() -> trackingScheduler.checkAllTechs()).start();
         return R.ok();
     }
 }

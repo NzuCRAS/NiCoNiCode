@@ -21,6 +21,7 @@ public class KnowledgeService {
     private final KnowledgeDocMapper docMapper;
     private final VectorService vectorService;
     private final EmbeddingService embeddingService;
+    private final DocumentETLService etlService;
 
     public Page<KnowledgeDoc> listDocs(int page, int size, String keyword, String tag) {
         return listDocs(page, size, keyword, tag, null);
@@ -101,50 +102,11 @@ public class KnowledgeService {
 
     @Async
     public void asyncEmbedAndStore(KnowledgeDoc doc) {
-        try {
-            // 分片（按段落，简单策略）
-            List<String> chunks = splitContent(doc.getContent(), 800);
-            List<float[]> vectors = new ArrayList<>();
-            List<Map<String, Object>> payloads = new ArrayList<>();
-
-            for (int i = 0; i < chunks.size(); i++) {
-                float[] vec = embeddingService.embed(chunks.get(i));
-                vectors.add(vec);
-                Map<String, Object> payload = new HashMap<>();
-                payload.put("source_type", doc.getSourceType());
-                payload.put("source_id", doc.getId());
-                payload.put("title", doc.getTitle());
-                payload.put("chunk_index", i);
-                payload.put("text", chunks.get(i));
-                payload.put("tags", doc.getTags());
-                payloads.add(payload);
-            }
-
-            vectorService.upsertVectors(vectors, payloads);
-            log.info("Embedded and stored {} chunks for doc {}", chunks.size(), doc.getId());
-        } catch (Exception e) {
-            log.error("Failed to embed doc {}", doc.getId(), e);
+        DocumentETLService.ETLResult result = etlService.process(
+                doc.getId(), doc.getTitle(), doc.getContent(),
+                doc.getSourceType(), doc.getTags());
+        if (!result.isSuccess()) {
+            log.error("ETL pipeline failed for doc {}: {}", doc.getId(), result.getError());
         }
-    }
-
-    private List<String> splitContent(String content, int maxChars) {
-        List<String> chunks = new ArrayList<>();
-        String[] paragraphs = content.split("\n\n+");
-        StringBuilder current = new StringBuilder();
-
-        for (String p : paragraphs) {
-            if (current.length() + p.length() > maxChars && !current.isEmpty()) {
-                chunks.add(current.toString().trim());
-                current = new StringBuilder();
-            }
-            current.append(p).append("\n\n");
-        }
-        if (!current.isEmpty()) {
-            chunks.add(current.toString().trim());
-        }
-        if (chunks.isEmpty()) {
-            chunks.add(content);
-        }
-        return chunks;
     }
 }

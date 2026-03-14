@@ -25,6 +25,10 @@ export const useUserStore = defineStore('user', () => {
     await api.post('/auth/send-code', { email: codeEmail })
   }
 
+  async function resetPassword(resetEmail: string, code: string, newPassword: string) {
+    await api.post('/auth/reset-password', { email: resetEmail, code, newPassword })
+  }
+
   function setAuth(data: any) {
     token.value = data.token
     userId.value = data.userId
@@ -56,5 +60,5 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  return { token, userId, email, nickname, role, isLoggedIn, login, register, sendCode, logout, fetchMe }
+  return { token, userId, email, nickname, role, isLoggedIn, login, register, sendCode, resetPassword, logout, fetchMe }
 })

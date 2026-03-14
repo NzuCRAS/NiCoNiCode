@@ -135,6 +135,13 @@ ALTER TABLE `tech_report` ADD COLUMN `tech_index` INT DEFAULT 0 COMMENT '技术�
 -- knowledge_doc 添加分类字段
 ALTER TABLE `knowledge_doc` ADD COLUMN `category_id` BIGINT DEFAULT NULL;
 
+-- tracked_tech 添加追踪模式和最新 commit SHA
+ALTER TABLE `tracked_tech` ADD COLUMN `tracking_mode` VARCHAR(20) DEFAULT 'RELEASE';
+ALTER TABLE `tracked_tech` ADD COLUMN `last_known_commit_sha` VARCHAR(40) NULL;
+
+-- tech_report 允许 tracked_tech_id 为 NULL (手动创建报道)
+ALTER TABLE `tech_report` MODIFY COLUMN `tracked_tech_id` BIGINT NULL;
+
 -- 勘误表
 CREATE TABLE IF NOT EXISTS `errata` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -148,4 +155,18 @@ CREATE TABLE IF NOT EXISTS `errata` (
     `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX `idx_doc` (`doc_type`, `doc_id`),
     INDEX `idx_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 聊天全链路追踪表
+CREATE TABLE IF NOT EXISTS `chat_trace` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `session_id` BIGINT NOT NULL,
+    `message_id` BIGINT,
+    `stage` VARCHAR(50) NOT NULL COMMENT 'INTENT/REWRITE/RETRIEVE/TOOL_CALL/GENERATE/SUMMARY',
+    `input` TEXT,
+    `output` TEXT,
+    `duration_ms` INT,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_session_id` (`session_id`),
+    INDEX `idx_stage` (`stage`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

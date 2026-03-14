@@ -90,3 +90,60 @@ Node.js运行时
 5.技术报道在被保存为知识文档时需要根据内容标记好对应的分类以及tag
 6.技术报道在ai编写的时候，我们的标准需要修改一下，不是硬性地要求一定要多少字，而是让ai把这次更新每个地方都讲清楚，此外，需要给每篇技术报道都增加一个技术指数，在ai编写时生成，根据这次更新的质量以及影响因子来判断，范围为0 - 1000，举例，0为一个无人在意的小型开源项目的一次README文件更新，而1000代表着claude等最前沿的大模型的版本迭代，这个指数是恒定的，记录下来就不变，然后后续和我们的时间指数（代表着该报道的时效性，总分为840，刚发布时满分，每小时跌5分），这个时间指数是实时变化且实时计算的，这两个指数结合起来进行技术报道的优先级排序，具体的排序以及前端展示后续再进行设计
 7.需要给管理员的管理页面增加一个管理追踪的技术的功能
+
+3.12 13.59
+1.根据我们刚才新加入的报道评分系统，对技术报道整个页面进行重构，现在要尽力模仿报纸的排版以及风格（不用做出纸媒的效果），也就是意味着有头条/不同版面等内容，此时就根据我们的技术评分以及时效性评分来对每篇报道进行排序，然后根据排序放入不同的地方（比如说分数最高的就放入头条中），根据分类放入不同的版面
+2.在登录页面增加一个忘记密码，通过邮箱发送验证码的方式修改新密码的功能
+3.在管理员的管理页面增加一个修改我们“狗仔agent”追踪技术的频率的功能（最短为30分钟），以及一个立刻让agent检测所有追踪中的技术是否有新版本发布然后撰写报告并发布的按钮
+4.在ai聊天界面存在一些问题：
+   a.目前用户发送一条消息，用户的消息不会立刻显示，而是只显示ai侧的“思考中”聊天气泡，同时这个聊天气泡会在该用户的所有会话中都显示，需要修改成这种效果：用户发送消息后，仅在对应的会话中，显示该用户发送的消息，以及ai侧的“正在深度思考”
+   b.目前每个会话ai第一次回复之后，为该会话添加的标题没有立刻显示，而是切换页面回来之后才显示，需要做成ai第一次回复之后就修改标题
+
+3.13 13.00
+1.现在ai对话界面还是存在一个问题，当我创建一个新会话，发送一条消息之后，在ai正在思考而没有回答之前，我点击创建新会话，就会创建一个新会话并且把现在这个还未回复的会话给覆盖掉，而且最后ai生成回复之后，只有ai侧的回复，用户侧的问题就被吃掉了，只有重新加载页面才有，这点需要修复，而且需要看看前端以及后端这个会话的实现是否还存在其他bug
+2.能不能实现这样一种功能，就是同一技术/框架/中间件等等的所有知识文档/更新报道聚合到一起，知识文档按照模块分布，比如说一个讲解Springboot的AOP特性的知识文档，其就存在于“特性”这一模块中；而更新报道就做一个时间线一样的设计，从上到下按照从新到旧的顺序排列，网页设计可以参考https://demo.typecho.work/
+3.我们的对话的agent需要添加一些功能，比如说多路检索引擎（意向定向 +—— 全局向量双通道并行，检索结果经去重，重排序等后处理流水线），意图识别（树形意图识别分类体系，置信度不足时自动引导澄清），问题重写与拆分（复杂问题拆分成子问题分别检索），会话记忆（滑动窗口 + 自动摘要压缩），文档入库ETL（基于节点编排，从解析，分块，向量化到写入qdrant，每步可配置，有日志），全链路追踪（每次对话的重写，意图，检索，生成等多个环节都有trace记录），模型路由和候选（多模型候选，优先级调度，首包检测，熔断和自动降级）
+（话说我们的预回答机制做好了吗，RAG使用了吗，MCP使用了吗（我刚才测试了一下，发现我们好像没用github的mcp server就可以正常访问github并且给出比较合理正确的回答））
+4.此外，我们ai对话界面需要添加一些这样的功能：ai侧的重新生成/停止生成/复制文本，用户侧的编辑最后一条消息并且重新发送/删除某条消息（此后也不作为上下文使用）/复制文本，也就是添加那些ai对话中一般存在的功能
+
+3.13 23.40
+1.在ai对话时存在报错如下：
+2026-03-13T23:39:24.718+08:00 ERROR 20596 --- [nio-8080-exec-3] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] threw exception
+
+org.springframework.security.access.AccessDeniedException: Access Denied
+	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:98) ~[spring-security-web-6.3.5.jar:6.3.5]
+2026-03-13T23:39:24.722+08:00 ERROR 20596 --- [nio-8080-exec-3] o.a.c.c.C.[.[.[/].[dispatcherServlet]    : Servlet.service() for servlet [dispatcherServlet] in context with path [] threw exception [Unable to handle the Spring Security Exception because the response is already committed.] with root cause
+
+org.springframework.security.access.AccessDeniedException: Access Denied
+	at org.springframework.security.web.access.intercept.AuthorizationFilter.doFilter(AuthorizationFilter.java:98) ~[spring-security-web-6.3.5.jar:6.3.5]
+2026-03-13T23:39:24.734+08:00 ERROR 20596 --- [nio-8080-exec-3] s.e.ErrorMvcAutoConfiguration$StaticView : Cannot render error page for request [null] as the response has already been committed. As a result, the response may have the wrong status code.
+而且现在ai对话存在很多问题：
+由于现在ai对话是流式的，所以格式解析存在问题，按理来说应该要像deepseek网页版那样每输出一段完整的封闭的格式符号，就把对应的部分给解析好并且展示出来，现在不仅流式传输中没有正确解析格式，就连内容完全传输完毕之后，格式也没有正确解析；
+现在用户发出一个请求，ai在生成时会显示两个气泡，一个是流式传输中的内容，一个是“正在生成”的小气泡，而且就算生成完毕了这个气泡也没有消失，需要移除
+总而言之，现在ai对话这边的前端有很多bug，需要仔细审查修复优化
+2.现在管理员界面撰写报道和技术文档会报错：
+2026-03-13T23:45:28.593+08:00 ERROR 20596 --- [nio-8080-exec-9] c.n.c.exception.GlobalExceptionHandler   : Unexpected error
+
+org.springframework.dao.DataIntegrityViolationException: 
+### Error updating database.  Cause: java.sql.SQLException: Field 'tracked_tech_id' doesn't have a default value
+此外在撰写报告时添加一个填写该报告的技术指数的地方，用于排序
+3.关于我们报道页面的前端重构，我只是让你参考那个文件，不是完全复制，你需要学习那个css的排版，背景颜色/风格等等要和我们其他页面保持一致
+
+3.14 11.09
+1.文档向量化存在问题，运行时后端有日志报错如下：
+2026-03-14T11:06:09.389+08:00 ERROR 34792 --- [       Thread-4] c.n.knowledge.service.KnowledgeService   : Failed to embed doc 13
+
+org.springframework.web.client.HttpClientErrorException$NotFound: 404 Not Found: "{"status":{"error":"Not found: Collection `niconicode_knowledge` doesn't exist!"},"time":8.4e-6}"
+2.ai对话显示工具调用时有点问题，比如说让ai去查询一下今天的所有报道，ai调用工具时会这样显示：
+搜索中: getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech, getRecentReportsForTech...
+虽然结果是正确的，但是显示需要修复一下；
+此外，之前说的ai生成时会出现两个气泡，这个问题没有修复，只是生成完毕后只有一个气泡，这里修复好了，但是生成时还是有一个多余的气泡，需要移除，需要检查相关逻辑
+3.之前说的ai优化，也就是多路检索引擎（意向定向 +—— 全局向量双通道并行，检索结果经去重，重排序等后处理流水线），意图识别（树形意图识别分类体系，置信度不足时自动引导澄清），问题重写与拆分（复杂问题拆分成子问题分别检索），会话记忆（滑动窗口 + 自动摘要压缩），文档入库ETL（基于节点编排，从解析，分块，向量化到写入qdrant，每步可配置，有日志），全链路追踪（每次对话的重写，意图，检索，生成等多个环节都有trace记录），模型路由和候选（多模型候选，优先级调度，首包检测，熔断和自动降级）
+等等是否已经完成，MCP是否已经开始使用,如果没有完成需要制定计划并且完成
+4.现在狗仔agent还需要很多优化，比如：
+现在的报道中会存在一些字眼，比如：“业内专家指出”，而这是不需要的，也就是说，ai不用去模拟现实的报刊环境，只需要做好分析整理总结即可，但是像是“AI建议”/“技术背景”这种言之有物且有用的内容可以留下
+我认为我们的狗仔agent可以做multi-agent的实现方案，大致分为三个agent，
+一个负责从各处数据源搜索所有我们追踪的项目的所有更新情况，然后阅读之后把更新内容总结（关键部分完全保留）递给我们编写报道的agent
+一个负责编写报道，需要尽善尽美地完成这份报道，保证内容充实，且不言之无物，最重要的是要避免ai幻觉，保证内容可靠有力有用，编写完成之后交给我们的审核agent
+一个负责打分以及审核，需要对编写好的文章进行审核，查看有没有敏感信息，如果有就给予修改，之后根据一套完整的评分标准对该报道进行技术评分，之后发布
+此外，现在agent检索技术/项目更新情况时，存在一个检索不全面的问题，比如说ai检测到其更新（比如说commit中），却没有在release中找到新的版本，这时也要翻阅该技术所有能够查询到更新的渠道（什么官网/文档/rss源/github各种地方都试一下），只有完全找不到可用信息，才在文章中提供相关链接并且说明这次更新可能不是可用更新，同时技术评分要打得比较低，避免无用更新的文章污染版面

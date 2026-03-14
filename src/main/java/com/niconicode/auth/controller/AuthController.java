@@ -3,6 +3,7 @@ package com.niconicode.auth.controller;
 import com.niconicode.auth.dto.AuthResp;
 import com.niconicode.auth.dto.LoginReq;
 import com.niconicode.auth.dto.RegisterReq;
+import com.niconicode.auth.dto.ResetPasswordReq;
 import com.niconicode.auth.entity.User;
 import com.niconicode.auth.service.AuthService;
 import com.niconicode.common.result.R;
@@ -38,6 +39,12 @@ public class AuthController {
     @PostMapping("/login")
     public R<AuthResp> login(@Valid @RequestBody LoginReq req) {
         return R.ok(authService.login(req));
+    }
+
+    @PostMapping("/reset-password")
+    public R<Void> resetPassword(@Valid @RequestBody ResetPasswordReq req) {
+        authService.resetPassword(req.getEmail(), req.getCode(), req.getNewPassword());
+        return R.ok();
     }
 
     @GetMapping("/me")

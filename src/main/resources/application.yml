@@ -27,7 +27,6 @@ mybatis-plus:
   mapper-locations: classpath:mapper/*.xml
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
   global-config:
     db-config:
       id-type: auto
@@ -37,11 +36,23 @@ mybatis-plus:
 
 # AI Configuration
 ai:
+  tools:
+    enabled: true
+  hot-topic:
+    promotion-threshold: 10
   model:
     base-url: https://api.siliconflow.cn/v1
     api-key: sk-bmmrcwucxqiffmwebjqbztqllhjervqoifbrerrbaugzejpv
     model-name: deepseek-ai/DeepSeek-V3
     timeout: 120
+  fallback-model:
+    base-url: https://api.siliconflow.cn/v1
+    api-key: sk-bmmrcwucxqiffmwebjqbztqllhjervqoifbrerrbaugzejpv
+    model-name: deepseek-ai/DeepSeek-V2.5
+    timeout: 120
+  circuit-breaker:
+    failure-threshold: 3
+    reset-timeout: 60
   embedding:
     base-url: https://api.siliconflow.cn/v1
     api-key: sk-bmmrcwucxqiffmwebjqbztqllhjervqoifbrerrbaugzejpv
@@ -71,4 +82,4 @@ mcp:
 
 logging:
   level:
-    com.niconicode: debug
+    com.niconicode: DEBUG

@@ -17,6 +17,8 @@ public class TrackedTech {
     private String rssUrl;
     private String sitemapUrl;
     private String lastKnownVersion;
+    private String trackingMode;        // RELEASE, TAG, COMMIT
+    private String lastKnownCommitSha;
     private LocalDateTime lastCheckedAt;
     private Integer mentionCount;
     private Boolean isHot;

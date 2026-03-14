@@ -84,4 +84,17 @@ public class AuthService {
         user.setPassword(null);
         return user;
     }
+
+    public void resetPassword(String email, String code, String newPassword) {
+        if (!emailService.verifyCode(email, code)) {
+            throw new BusinessException(400, "验证码错误或已过期");
+        }
+        User user = userMapper.selectOne(
+                new LambdaQueryWrapper<User>().eq(User::getEmail, email));
+        if (user == null) {
+            throw new BusinessException(404, "该邮箱未注册");
+        }
+        user.setPassword(passwordEncoder.encode(newPassword));
+        userMapper.updateById(user);
+    }
 }

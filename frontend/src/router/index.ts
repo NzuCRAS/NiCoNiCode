@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/reports/:id', name: 'report-detail', component: () => import('../views/ReportDetailView.vue') },
     { path: '/knowledge', name: 'knowledge', component: () => import('../views/KnowledgeView.vue') },
     { path: '/knowledge/:id', name: 'knowledge-detail', component: () => import('../views/KnowledgeDetailView.vue') },
+    { path: '/tech/:id', name: 'tech-portal', component: () => import('../views/TechPortalView.vue') },
     { path: '/login', name: 'login', component: () => import('../views/LoginView.vue') },
     { path: '/register', name: 'register', component: () => import('../views/RegisterView.vue') },
     { path: '/admin', name: 'admin', component: () => import('../views/AdminView.vue'), meta: { requiresAuth: true, requiresAdmin: true } }
