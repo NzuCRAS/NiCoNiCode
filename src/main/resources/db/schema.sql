@@ -139,6 +139,13 @@ ALTER TABLE `knowledge_doc` ADD COLUMN `category_id` BIGINT DEFAULT NULL;
 ALTER TABLE `tracked_tech` ADD COLUMN `tracking_mode` VARCHAR(20) DEFAULT 'RELEASE';
 ALTER TABLE `tracked_tech` ADD COLUMN `last_known_commit_sha` VARCHAR(40) NULL;
 
+-- chat_message 添加软删除字段
+ALTER TABLE `chat_message` ADD COLUMN `deleted_at` DATETIME DEFAULT NULL;
+CREATE INDEX idx_msg_session_active ON chat_message(session_id, deleted_at);
+
+-- chat_message 添加元数据字段
+ALTER TABLE `chat_message` ADD COLUMN `metadata` TEXT DEFAULT NULL COMMENT 'JSON: tool calls, intent, etc.';
+
 -- tech_report 允许 tracked_tech_id 为 NULL (手动创建报道)
 ALTER TABLE `tech_report` MODIFY COLUMN `tracked_tech_id` BIGINT NULL;
 
@@ -157,16 +164,13 @@ CREATE TABLE IF NOT EXISTS `errata` (
     INDEX `idx_status` (`status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 聊天全链路追踪表
-CREATE TABLE IF NOT EXISTS `chat_trace` (
+-- 会话摘要版本表
+CREATE TABLE IF NOT EXISTS `session_summary` (
     `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
     `session_id` BIGINT NOT NULL,
-    `message_id` BIGINT,
-    `stage` VARCHAR(50) NOT NULL COMMENT 'INTENT/REWRITE/RETRIEVE/TOOL_CALL/GENERATE/SUMMARY',
-    `input` TEXT,
-    `output` TEXT,
-    `duration_ms` INT,
+    `version` INT NOT NULL DEFAULT 1,
+    `content` TEXT,
+    `trigger_type` VARCHAR(20) DEFAULT 'AUTO_COMPRESS' COMMENT 'AUTO_COMPRESS/MSG_DELETE/MANUAL',
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX `idx_session_id` (`session_id`),
-    INDEX `idx_stage` (`stage`)
+    INDEX `idx_session_version` (`session_id`, `version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -49,11 +49,21 @@ public class LangChain4jConfig {
     private final AtomicReference<Instant> circuitOpenSince = new AtomicReference<>(null);
 
     @Bean
+    @org.springframework.context.annotation.Primary
     public ChatLanguageModel chatLanguageModel() {
-        ChatLanguageModel primary = buildChatModel(baseUrl, apiKey, modelName, timeout);
-        ChatLanguageModel fallback = buildChatModel(fallbackBaseUrl, fallbackApiKey, fallbackModelName, fallbackTimeout);
+        ChatLanguageModel primary = buildChatModel(baseUrl, apiKey, modelName, timeout, 3);
+        ChatLanguageModel fallback = buildChatModel(fallbackBaseUrl, fallbackApiKey, fallbackModelName, fallbackTimeout, 3);
 
         return new CircuitBreakerChatModel(primary, fallback);
+    }
+
+    /**
+     * 快速模型：用于意图识别、问题重写等预处理任务
+     * 超时短 (15s)，不做熔断，不重试 (maxRetries=1)，超时直接失败让调用方 fallback
+     */
+    @Bean("fastChatModel")
+    public ChatLanguageModel fastChatModel() {
+        return buildChatModel(baseUrl, apiKey, modelName, 15, 1);
     }
 
     @Bean
@@ -68,13 +78,14 @@ public class LangChain4jConfig {
                 .build();
     }
 
-    private ChatLanguageModel buildChatModel(String url, String key, String model, int timeoutSec) {
+    private ChatLanguageModel buildChatModel(String url, String key, String model, int timeoutSec, int maxRetries) {
         return OpenAiChatModel.builder()
                 .baseUrl(url)
                 .apiKey(key)
                 .modelName(model)
                 .timeout(Duration.ofSeconds(timeoutSec))
                 .temperature(0.7)
+                .maxRetries(maxRetries)
                 .build();
     }
 

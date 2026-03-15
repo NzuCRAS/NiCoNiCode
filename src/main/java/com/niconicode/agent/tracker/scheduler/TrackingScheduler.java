@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.niconicode.agent.tracker.entity.TrackedTech;
 import com.niconicode.agent.tracker.mapper.TrackedTechMapper;
 import com.niconicode.agent.tracker.service.TrackerService;
+import com.niconicode.agent.chat.service.TraceLogger;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
@@ -23,10 +24,11 @@ public class TrackingScheduler {
 
     private final TrackedTechMapper techMapper;
     private final TrackerService trackerService;
+    private final TraceLogger traceLogger;
 
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private ScheduledFuture<?> scheduledTask;
-    private long intervalMinutes = 360; // 默认6小时
+    private long intervalMinutes = 60; // 默认1小时
 
     @PostConstruct
     public void init() {
@@ -65,13 +67,23 @@ public class TrackingScheduler {
         List<TrackedTech> techs = techMapper.selectList(
                 new LambdaQueryWrapper<TrackedTech>().eq(TrackedTech::getStatus, "ACTIVE"));
 
+        TraceLogger.TraceContext batchCtx = traceLogger.startTrace(-1L, 0L);
+        traceLogger.trace(batchCtx, "BATCH_START", "techCount=" + techs.size());
+
+        int success = 0;
+        int failed = 0;
         for (TrackedTech tech : techs) {
             try {
                 trackerService.checkTechUpdate(tech.getId());
+                success++;
             } catch (Exception e) {
+                failed++;
                 log.error("Failed to check tech: {}", tech.getName(), e);
             }
         }
+
+        traceLogger.trace(batchCtx, "BATCH_END", "success=" + success + ", failed=" + failed);
+        traceLogger.endTrace(batchCtx);
         log.info("Scheduled tech tracking check completed for {} techs", techs.size());
     }
 }

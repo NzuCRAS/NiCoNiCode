@@ -4,13 +4,17 @@
     <div v-if="loading" class="text-center py-12 text-gray-400">加载中...</div>
     <article v-else-if="report" class="bg-white p-8 rounded-xl border border-gray-200">
       <h1 class="text-2xl font-bold mb-3">{{ report.title }}</h1>
-      <div class="flex items-center space-x-3 mb-6 text-sm text-gray-500">
+      <div class="flex items-center space-x-3 mb-6 text-sm text-gray-500 flex-wrap">
         <span v-if="report.newVersion" class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
           {{ report.newVersion }}
         </span>
         <span v-if="report.publishedAt">发布: {{ formatDate(report.publishedAt) }}</span>
         <span v-if="report.createdAt && report.createdAt !== report.publishedAt">创建: {{ formatDate(report.createdAt) }}</span>
         <span v-if="report.updatedAt && report.updatedAt !== report.publishedAt">更新: {{ formatDate(report.updatedAt) }}</span>
+        <span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold"
+          :title="'技术指数 ' + (report.techIndex || 500) + ' × 0.6 + 时间指数 ' + calcTimeIndex(report.publishedAt) + ' × 0.4'">
+          综合指数: {{ calcCompositeScore(report).toFixed(0) }}
+        </span>
       </div>
       <div class="markdown-body" v-html="renderedContent"></div>
     </article>
@@ -111,5 +115,17 @@ function statusStyle(s: string) {
 function formatDate(date: string) {
   if (!date) return ''
   return new Date(date).toLocaleDateString('zh-CN')
+}
+
+function calcTimeIndex(publishedAt: string): number {
+  if (!publishedAt) return 0
+  const hours = (Date.now() - new Date(publishedAt).getTime()) / 3600000
+  return Math.max(0, Math.round(840 - hours * 5))
+}
+
+function calcCompositeScore(report: any): number {
+  const techIndex = report.techIndex ?? 500
+  const timeIndex = calcTimeIndex(report.publishedAt)
+  return techIndex * 0.6 + timeIndex * 0.4
 }
 </script>

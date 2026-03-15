@@ -22,7 +22,7 @@ export const useChatStore = defineStore('chat', () => {
   const loadingSessionId = ref<number | null>(null)
   const abortController = ref<AbortController | null>(null)
   const toolsInUse = ref<string[]>([])
-
+  const streamingStarted = ref(false)
   const messages = computed(() => {
     if (currentSessionId.value === null) return []
     return sessionMessagesCache.value.get(currentSessionId.value) || []
@@ -85,11 +85,21 @@ export const useChatStore = defineStore('chat', () => {
               if (currentSessionId.value === sessionId) {
                 currentSessionId.value = json.sessionId
               }
+              // 更新侧栏标题
+              if (json.sessionTitle) {
+                const s = sessions.value.find(s => s.id === json.sessionId)
+                if (s) {
+                  s.title = json.sessionTitle
+                } else {
+                  sessions.value.unshift({ id: json.sessionId, title: json.sessionTitle, updatedAt: new Date().toISOString() })
+                }
+              }
             } catch { /* ignore */ }
           } else if (currentEvent === 'error') {
             toolsInUse.value = []
           } else if (currentEvent === 'message') {
             toolsInUse.value = []
+            if (!streamingStarted.value) streamingStarted.value = true
             assistantMsg.content += extractMessageText(data)
           }
           currentEvent = ''
@@ -186,6 +196,7 @@ export const useChatStore = defineStore('chat', () => {
     const controller = new AbortController()
     abortController.value = controller
     toolsInUse.value = []
+    streamingStarted.value = false
 
     try {
       const response = await createSSEFetch(sessionId, message, controller)
@@ -195,6 +206,7 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       abortController.value = null
       toolsInUse.value = []
+      streamingStarted.value = false
       loadingSessionId.value = null
     }
   }
@@ -235,6 +247,7 @@ export const useChatStore = defineStore('chat', () => {
     const controller = new AbortController()
     abortController.value = controller
     toolsInUse.value = []
+    streamingStarted.value = false
 
     try {
       const response = await createSSEFetch(sessionId, newContent, controller)
@@ -244,6 +257,7 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       abortController.value = null
       toolsInUse.value = []
+      streamingStarted.value = false
       loadingSessionId.value = null
     }
   }
@@ -277,6 +291,7 @@ export const useChatStore = defineStore('chat', () => {
     const controller = new AbortController()
     abortController.value = controller
     toolsInUse.value = []
+    streamingStarted.value = false
 
     try {
       const response = await createSSEFetch(sessionId, lastUserMsg, controller)
@@ -286,6 +301,7 @@ export const useChatStore = defineStore('chat', () => {
     } finally {
       abortController.value = null
       toolsInUse.value = []
+      streamingStarted.value = false
       loadingSessionId.value = null
     }
   }
@@ -315,7 +331,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
     sessions, currentSessionId, messages, loadingSessionId, isCurrentSessionLoading,
-    abortController, toolsInUse,
+    abortController, toolsInUse, streamingStarted,
     loadSessions, createSession, loadMessages, sendMessage, sendMessageStream,
     deleteSession, deleteMessage, deleteMessagesAfter, editAndResend,
     regenerateLastReply, cancelStream

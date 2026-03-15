@@ -1,8 +1,8 @@
 package com.niconicode.agent.tracker.agent;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.niconicode.agent.tracker.entity.TrackedTech;
+import com.niconicode.agent.tracker.service.TechIndexCalculator;
+import com.niconicode.agent.chat.service.TraceLogger;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -19,7 +19,8 @@ import org.springframework.stereotype.Component;
 public class ReviewerAgent {
 
     private final ChatLanguageModel chatModel;
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final TechIndexCalculator techIndexCalculator;
+    private final TraceLogger traceLogger;
 
     @Data
     public static class ReviewResult {
@@ -34,20 +35,30 @@ public class ReviewerAgent {
      * 审核报道：内容审核 + 质量评分 + 发布决策
      */
     public ReviewResult review(TrackedTech tech, String reportContent,
-                                SearchAgent.SearchResult searchResult) {
+                                SearchAgent.SearchResult searchResult,
+                                TraceLogger.TraceContext traceCtx) {
         ReviewResult result = new ReviewResult();
 
         // Step 1: 内容审核
+        long reviewStart = System.currentTimeMillis();
         String contentReview = reviewContent(reportContent);
+        int reviewDuration = (int)(System.currentTimeMillis() - reviewStart);
+        boolean contentModified = !contentReview.equals(reportContent);
+        traceLogger.trace(traceCtx, "REVIEWER_CONTENT_REVIEW",
+                "modified=" + contentModified + ", duration=" + reviewDuration + "ms");
         result.setRevisedContent(contentReview);
 
-        // Step 2: 技术指数评分
-        int techIndex = scoreTechIndex(tech, reportContent, searchResult);
+        // Step 2: 技术指数评分（使用新的计算标准）
+        int techIndex = techIndexCalculator.calculateTechIndex(tech);
+        traceLogger.trace(traceCtx, "REVIEWER_TECH_INDEX", "score=" + techIndex);
         result.setTechIndex(techIndex);
 
         // Step 3: 低质量处理
         if (searchResult.getDataSufficiency() == SearchAgent.DataSufficiency.LOW) {
-            result.setTechIndex(Math.min(techIndex, 200));
+            int cappedIndex = Math.min(techIndex, 200);
+            traceLogger.trace(traceCtx, "REVIEWER_LOW_QUALITY",
+                    "original=" + techIndex + ", capped=" + cappedIndex);
+            result.setTechIndex(cappedIndex);
             result.setQualityNotes("数据来源有限，技术指数已压低");
         }
 
@@ -55,6 +66,10 @@ public class ReviewerAgent {
         if (techIndex < 50 && searchResult.getDataSufficiency() == SearchAgent.DataSufficiency.LOW) {
             result.setApproved(false);
             result.setRejectionReason("数据不足且技术指数过低");
+            traceLogger.trace(traceCtx, "REVIEWER_DECISION", "rejected: " + result.getRejectionReason());
+        } else {
+            traceLogger.trace(traceCtx, "REVIEWER_DECISION",
+                    "approved, techIndex=" + result.getTechIndex());
         }
 
         return result;
@@ -96,69 +111,5 @@ public class ReviewerAgent {
             return reportContent;
         }
     }
-
-    /**
-     * 精细化技术指数评分 (0-1000)
-     * 技术指数 = 技术影响力(40%) + 更新质量(30%) + 信息完整度(30%)
-     */
-    private int scoreTechIndex(TrackedTech tech, String reportContent,
-                                SearchAgent.SearchResult searchResult) {
-        String dataSufficiency = searchResult.getDataSufficiency().name();
-        int sourceCount = searchResult.getSourceUrls().size();
-        boolean hasReleaseNotes = searchResult.getReleaseInfo() != null
-                && searchResult.getReleaseInfo().getBody() != null
-                && searchResult.getReleaseInfo().getBody().length() > 50;
-        int commitCount = searchResult.getRecentCommits().size();
-
-        String prompt = """
-                请为以下技术更新生成一个 0-1000 的综合技术指数。返回严格 JSON 格式:
-                {"techInfluence": 0-400, "updateQuality": 0-300, "infoCompleteness": 0-300, "total": 0-1000}
-
-                评分维度:
-
-                1. 技术影响力 (0-400):
-                   - 项目知名度、Star 数、生态规模
-                   - 用户基数和社区活跃度
-                   参考: Spring/React/Vue=350+, 知名工具=200-350, 小型项目=50-200
-
-                2. 更新质量 (0-300):
-                   - 是否包含 breaking changes
-                   - 新功能的创新性
-                   - Bug 修复的重要性
-                   参考: 重大版本=250+, 常规更新=100-250, 小补丁=30-100
-
-                3. 信息完整度 (0-300):
-                   - 是否有完整 Release Notes: %s
-                   - 搜索到的信息渠道数量: %d
-                   - 数据充分度评估: %s
-                   - Commit 数量: %d
-                   参考: 完整Release=250+, 仅Tag=100-150, 仅Commit=50-100
-
-                技术: %s
-                分类: %s
-                版本: %s
-                报道摘要(前300字): %s
-
-                直接返回 JSON，不要其他文字。
-                """.formatted(
-                hasReleaseNotes, sourceCount, dataSufficiency, commitCount,
-                tech.getName(), tech.getCategory(), searchResult.getDetectedVersion(),
-                reportContent.length() > 300 ? reportContent.substring(0, 300) : reportContent);
-
-        try {
-            String response = chatModel.chat(prompt).trim();
-            int jsonStart = response.indexOf('{');
-            int jsonEnd = response.lastIndexOf('}');
-            if (jsonStart >= 0 && jsonEnd > jsonStart) {
-                response = response.substring(jsonStart, jsonEnd + 1);
-            }
-
-            JsonNode json = objectMapper.readTree(response);
-            int total = json.has("total") ? json.get("total").asInt() : 500;
-            return Math.max(0, Math.min(1000, total));
-        } catch (Exception e) {
-            log.warn("Tech index scoring failed for {}, using default 500", tech.getName(), e);
-            return 500;
-        }
-    }
 }
+

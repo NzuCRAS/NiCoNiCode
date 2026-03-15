@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.Data;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -13,11 +13,14 @@ import java.util.List;
 
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class QueryRewriter {
 
     private final ChatLanguageModel chatModel;
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    public QueryRewriter(@Qualifier("fastChatModel") ChatLanguageModel chatModel) {
+        this.chatModel = chatModel;
+    }
 
     @Data
     public static class RewriteResult {
@@ -31,6 +34,14 @@ public class QueryRewriter {
      * 2. 复合问题拆分为子查询
      */
     public RewriteResult rewrite(String query, String conversationContext) {
+        // 极短查询无条件绕过（不管有无上下文）
+        if (query.length() <= 5) {
+            RewriteResult result = new RewriteResult();
+            result.setRewritten(query);
+            result.setSubQueries(List.of(query));
+            return result;
+        }
+
         // 短查询或无上下文时跳过重写
         if (query.length() <= 10 && (conversationContext == null || conversationContext.isBlank())) {
             RewriteResult result = new RewriteResult();
@@ -40,6 +51,7 @@ public class QueryRewriter {
         }
 
         String prompt = """
+                当前日期: %s
                 根据对话上下文，重写以下用户查询。返回严格的 JSON 格式（不要包含其他文字）:
                 {"rewritten": "重写后的查询", "subQueries": ["子查询1", "子查询2"]}
 
@@ -48,12 +60,15 @@ public class QueryRewriter {
                 2. 如果是复合问题（如对比两个技术），拆分为独立子查询
                 3. 如果查询已经足够清晰且是单一问题，subQueries 只包含 rewritten 本身
                 4. 重写后的查询应该独立可理解，不依赖上下文
+                5. "今天"指 %s，"最近"指最近7天，请将时间词替换为具体日期
 
                 对话上下文（最近几轮）:
                 %s
 
                 当前用户查询: %s
                 """.formatted(
+                java.time.LocalDate.now().toString(),
+                java.time.LocalDate.now().toString(),
                 conversationContext != null ? conversationContext : "无",
                 query);
 

@@ -147,3 +147,59 @@ org.springframework.web.client.HttpClientErrorException$NotFound: 404 Not Found:
 一个负责编写报道，需要尽善尽美地完成这份报道，保证内容充实，且不言之无物，最重要的是要避免ai幻觉，保证内容可靠有力有用，编写完成之后交给我们的审核agent
 一个负责打分以及审核，需要对编写好的文章进行审核，查看有没有敏感信息，如果有就给予修改，之后根据一套完整的评分标准对该报道进行技术评分，之后发布
 此外，现在agent检索技术/项目更新情况时，存在一个检索不全面的问题，比如说ai检测到其更新（比如说commit中），却没有在release中找到新的版本，这时也要翻阅该技术所有能够查询到更新的渠道（什么官网/文档/rss源/github各种地方都试一下），只有完全找不到可用信息，才在文章中提供相关链接并且说明这次更新可能不是可用更新，同时技术评分要打得比较低，避免无用更新的文章污染版面
+
+
+3.14 22.17
+1.更新之后ai对话处会存在一个问题，当ai思考一段时间，后端就会一直反复这样报错：
+2026-03-14T22:32:17.980+08:00  WARN 25060 --- [onPool-worker-6] c.n.agent.chat.service.ChatService       : SSE complete failed
+
+java.lang.IllegalStateException: ResponseBodyEmitter has already completed
+同时如果当时有输出的话，就会截断并且停止输出，但是会显示“思考中”的字样，如果那时还没有输出，就只会显示“正在思考中”，同时后端存在历史记录
+2.我们小组指定了一套新的技术指数的评分标准，在项目根目录的score文件中，将其替换原有的评分标准
+3.之前说要设计的全链路追踪，不是要将其写入一张表，而是通过一个tracedId，在日志中将从用户发送消息，一直到ai返回消息，包括中间的工具调用/RAG使用以及检索到的文档都打印出来，方便开发和生产时查看，定位问题，这里需要清除原有的错误逻辑并且给予修复；
+同时也要给狗仔系统那边做一份全链路追踪，与聊天中相似的设计
+
+3.15 16.14
+发现一个问题，现在在ai对话中，用户发出一个请求，一段时间后会这样报错：
+2026-03-15T16:11:18.542+08:00  WARN 46508 --- [onPool-worker-1] dev.langchain4j.internal.RetryUtils      : Exception was thrown on attempt 1 of 3
+
+java.lang.RuntimeException: java.net.http.HttpTimeoutException: request timed out
+	at dev.langchain4j.http.client.jdk.JdkHttpClient.execute(JdkHttpClient.java:56) ~[langchain4j-http-client-jdk-1.0.0-beta2.jar:na]
+
+接着是
+2026-03-15T16:11:34.068+08:00  WARN 46508 --- [onPool-worker-1] dev.langchain4j.internal.RetryUtils      : Exception was thrown on attempt 2 of 3
+
+java.lang.RuntimeException: java.net.http.HttpTimeoutException: request timed out
+	at dev.langchain4j.http.client.jdk.JdkHttpClient.execute(JdkHttpClient.java:56) ~[langchain4j-http-client-jdk-1.0.0-beta2.jar:na]
+在这段时间里，会有一个显示“正在思考（抑或是正在生成）”的提示气泡，我们暂称其为A
+然后沉默一会，后续出现以下日志：
+2026-03-15T16:11:36.405+08:00 DEBUG 46508 --- [onPool-worker-1] c.n.agent.chat.service.QueryRewriter     : Query rewritten: 'ping' -> 'ping' (1 sub-queries)
+2026-03-15T16:11:36.405+08:00  INFO 46508 --- [onPool-worker-1] c.n.agent.chat.service.TraceLogger       : [TRACE:116857b7] [QUERY_REWRITE] original=ping -> rewritten=ping, duration=32877ms
+2026-03-15T16:12:10.067+08:00  INFO 46508 --- [onPool-worker-1] c.n.agent.chat.service.TraceLogger       : [TRACE:116857b7] [STREAM_START]
+2026-03-15T16:12:57.142+08:00 DEBUG 46508 --- [onPool-worker-1] c.n.c.mapper.ChatMessageMapper.insert    : ==>  Preparing: INSERT INTO chat_message ( session_id, role, content, token_count ) VALUES ( ?, ?, ?, ? )
+出现A以外的新的聊天气泡B，在B中开始进行流式传输，流式地显示ai返回的内容
+当B中流式传输结束后，A消失
+说明我们ai聊天处的处理链路可能存在问题，我们的设计中应该是这样的：
+- 用户发出问题 
+- 上下文处理（自动补全上下文，滑动窗口 + 自动摘要压缩）（上下文是贯穿整个会话的，需要通过数据库进行持久化：
+   会话 ID：唯一标识一个对话线程。
+
+   用户 ID（如果有用户系统）：区分不同用户。
+
+   消息列表：每一条消息包括：
+
+   角色（user / assistant / system）
+
+   内容（文本）
+
+   时间戳
+
+   可选的元数据（如 token 数、模型名称、工具调用结果等）
+   ）
+   （我们后续可能要通过redis把用户正在对话的上下文存储起来，提高访问速度）
+- 对用户的问题进行意图识别（通过我们的树形意图分类，置信度不足时主动进行澄清） 
+- 进入不同的处理（简单的问题直接通过模型路由调用简单的模型进行快速回答，复杂的问题进行后续处理）
+- 复杂问题进行指代消解/子问题拆分/task制定
+- 然后交给agent来进行ReAct处理，每轮处理都提供tool和RAG供其调用
+- 流式传输给用户，持久化到数据库中
+上述整个链路我们都需要进行全链路追踪，在日志中打印

@@ -73,7 +73,12 @@
       "Bash(find /c/Code/JAVA/niconicode -name \"*.java\" -type f | xargs grep -l \"compress\\\\|summary.*compress\\\\|session.*window\" | head -20)",
       "Bash(find . -name \"*.java\" -type f -exec grep -l \"VectorService\\\\|ensureCollection\" {} \\\\; | head -20)",
       "Bash(grep -r \"setSummary\\\\|getSummary\" /c/Code/JAVA/niconicode/src/main/java --include=\"*.java\" 2>/dev/null | head -20)",
-      "Bash(find . -name \"*.md\" -o -name \"*.txt\" | xargs grep -l \"业内专家\\\\|质量\\\\|报道\\\\|内容\" 2>/dev/null | head -10)"
+      "Bash(find . -name \"*.md\" -o -name \"*.txt\" | xargs grep -l \"业内专家\\\\|质量\\\\|报道\\\\|内容\" 2>/dev/null | head -10)",
+      "Bash(./mvnw compile:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(jar xf:*)",
+      "Read(//tmp/lc4j_src/dev/langchain4j/model/openai/**)"
     ]
   }
 }

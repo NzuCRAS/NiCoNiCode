@@ -4,6 +4,7 @@ import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
 import com.niconicode.agent.tracker.entity.TrackedTech;
 import com.niconicode.agent.tracker.service.GitHubMonitorService;
+import com.niconicode.agent.chat.service.TraceLogger;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
@@ -26,6 +27,7 @@ public class SearchAgent {
 
     private final GitHubMonitorService githubMonitor;
     private final ChatLanguageModel chatModel;
+    private final TraceLogger traceLogger;
 
     public enum DataSufficiency { HIGH, MEDIUM, LOW }
 
@@ -42,7 +44,7 @@ public class SearchAgent {
         private List<String> sourceUrls = new ArrayList<>();
     }
 
-    public SearchResult search(TrackedTech tech) {
+    public SearchResult search(TrackedTech tech, TraceLogger.TraceContext traceCtx) {
         SearchResult result = new SearchResult();
 
         if (tech.getGithubRepo() == null || tech.getGithubRepo().isBlank()) {
@@ -51,29 +53,36 @@ public class SearchAgent {
         }
 
         String mode = tech.getTrackingMode() != null ? tech.getTrackingMode() : "RELEASE";
+        traceLogger.trace(traceCtx, "SEARCH_MODE", "mode=" + mode);
 
         switch (mode) {
-            case "RELEASE" -> searchReleaseMode(tech, result);
-            case "TAG" -> searchTagMode(tech, result);
-            case "COMMIT" -> searchCommitMode(tech, result);
-            default -> searchReleaseMode(tech, result);
+            case "RELEASE" -> searchReleaseMode(tech, result, traceCtx);
+            case "TAG" -> searchTagMode(tech, result, traceCtx);
+            case "COMMIT" -> searchCommitMode(tech, result, traceCtx);
+            default -> searchReleaseMode(tech, result, traceCtx);
         }
 
         if (result.isHasUpdate()) {
             // AI 总结搜集到的原始信息
+            long summarizeStart = System.currentTimeMillis();
             result.setRawInfoSummary(summarizeRawInfo(result, tech));
+            int summarizeDuration = (int)(System.currentTimeMillis() - summarizeStart);
+            traceLogger.trace(traceCtx, "SEARCH_SUMMARIZE", "duration=" + summarizeDuration + "ms");
+
             result.setDataSufficiency(evaluateDataSufficiency(result));
+            traceLogger.trace(traceCtx, "SEARCH_DATA_SUFFICIENCY", "level=" + result.getDataSufficiency());
         }
 
         return result;
     }
 
-    private void searchReleaseMode(TrackedTech tech, SearchResult result) {
+    private void searchReleaseMode(TrackedTech tech, SearchResult result, TraceLogger.TraceContext traceCtx) {
         // 1. 检查 GitHub Release
         String newVersion = githubMonitor.checkLatestRelease(
                 tech.getGithubRepo(), tech.getLastKnownVersion());
 
         if (newVersion != null) {
+            traceLogger.trace(traceCtx, "SEARCH_RELEASE_CHECK", "newVersion=" + newVersion);
             result.setHasUpdate(true);
             result.setDetectedVersion(newVersion);
             result.setUpdateMode("RELEASE");
@@ -93,16 +102,20 @@ public class SearchAgent {
                 List<GitHubCommitInfo> commits = githubMonitor.getCommitsSince(
                         tech.getGithubRepo(), sinceDate, 10);
                 result.setRecentCommits(commits);
+                traceLogger.trace(traceCtx, "SEARCH_SUPPLEMENTARY_COMMITS", "count=" + commits.size());
             } catch (Exception e) {
                 log.debug("Failed to get supplementary commits for {}", tech.getName());
             }
             return;
         }
 
+        traceLogger.trace(traceCtx, "SEARCH_RELEASE_CHECK", "noRelease, trying tag fallback");
+
         // 2. Release 404 降级: 尝试 Tag
         String newTag = githubMonitor.checkLatestTag(
                 tech.getGithubRepo(), tech.getLastKnownVersion());
         if (newTag != null) {
+            traceLogger.trace(traceCtx, "SEARCH_TAG_FALLBACK", "tag=" + newTag);
             result.setHasUpdate(true);
             result.setDetectedVersion(newTag);
             result.setUpdateMode("TAG");
@@ -111,19 +124,22 @@ public class SearchAgent {
         }
     }
 
-    private void searchTagMode(TrackedTech tech, SearchResult result) {
+    private void searchTagMode(TrackedTech tech, SearchResult result, TraceLogger.TraceContext traceCtx) {
         String newTag = githubMonitor.checkLatestTag(
                 tech.getGithubRepo(), tech.getLastKnownVersion());
         if (newTag != null) {
+            traceLogger.trace(traceCtx, "SEARCH_TAG_CHECK", "tag=" + newTag);
             result.setHasUpdate(true);
             result.setDetectedVersion(newTag);
             result.setUpdateMode("TAG");
             result.setTagInfo(newTag);
             result.getSourceUrls().add("https://github.com/" + tech.getGithubRepo() + "/tags");
+        } else {
+            traceLogger.trace(traceCtx, "SEARCH_TAG_CHECK", "noNewTag");
         }
     }
 
-    private void searchCommitMode(TrackedTech tech, SearchResult result) {
+    private void searchCommitMode(TrackedTech tech, SearchResult result, TraceLogger.TraceContext traceCtx) {
         GitHubCommitInfo latestCommit = githubMonitor.checkLatestCommit(
                 tech.getGithubRepo(), tech.getLastKnownCommitSha());
         if (latestCommit != null) {
@@ -141,6 +157,9 @@ public class SearchAgent {
             }
             result.setRecentCommits(commits);
             result.getSourceUrls().add("https://github.com/" + tech.getGithubRepo() + "/commits");
+            traceLogger.trace(traceCtx, "SEARCH_COMMIT_CHECK", "commits=" + commits.size());
+        } else {
+            traceLogger.trace(traceCtx, "SEARCH_COMMIT_CHECK", "noNewCommit");
         }
     }
 

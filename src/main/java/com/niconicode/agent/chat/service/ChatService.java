@@ -2,6 +2,7 @@ package com.niconicode.agent.chat.service;
 
 import com.niconicode.agent.chat.dto.ChatReq;
 import com.niconicode.agent.chat.dto.ChatResp;
+import com.niconicode.agent.chat.dto.ConversationContext;
 import com.niconicode.conversation.entity.ChatMessage;
 import com.niconicode.conversation.entity.ChatSession;
 import com.niconicode.agent.tracker.service.TrackerService;
@@ -26,6 +27,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -41,7 +43,8 @@ public class ChatService {
     private final TrackerService trackerService;
     private final IntentClassifier intentClassifier;
     private final QueryRewriter queryRewriter;
-    private final ChatTraceService traceService;
+    private final TraceLogger traceLogger;
+    private final ConversationContextBuilder contextBuilder;
 
     @Value("${ai.tools.enabled:true}")
     private boolean toolsEnabled;
@@ -59,19 +62,23 @@ public class ChatService {
             3. 能够查询技术追踪系统了解最新版本和更新动态
             4. 回答准确、条理清晰，善用代码示例
             注意事项：
+            - 当前日期：%s
             - 使用中文回答
             - 代码使用 Markdown 格式
             - 不确定的内容要如实说明
             - 当用户询问特定技术的版本、更新、文档时，优先使用工具获取准确信息
             - 简单的问候或通用问题无需使用工具，直接回答即可
             - 使用工具搜索到的内容要注明来源
+            - 当用户说"今天"、"最近"等时间词时，以当前日期为基准
             """;
 
     public ChatResp processMessage(Long userId, ChatReq req) {
         ChatSession session = memoryService.getOrCreateSession(userId, req.getSessionId(), req.getMessage());
         boolean isFirstMessage = isFirstMessage(session.getId());
 
-        List<dev.langchain4j.data.message.ChatMessage> messages = buildMessages(session, req.getMessage());
+        ConversationContext ctx = contextBuilder.build(userId, session);
+        List<dev.langchain4j.data.message.ChatMessage> messages =
+                ctx.toLangChainMessages(SYSTEM_PROMPT.formatted(java.time.LocalDate.now().toString()), req.getMessage());
 
         String reply;
         try {
@@ -107,19 +114,25 @@ public class ChatService {
     }
 
     public SseEmitter processMessageStream(Long userId, ChatReq req) {
-        SseEmitter emitter = new SseEmitter(120_000L);
+        SseEmitter emitter = new SseEmitter(300_000L); // 5分钟总超时
 
         ChatSession session = memoryService.getOrCreateSession(userId, req.getSessionId(), req.getMessage());
-        List<dev.langchain4j.data.message.ChatMessage> messages = buildMessages(session, req.getMessage());
+        TraceLogger.TraceContext traceCtx = traceLogger.startTrace(userId, session.getId());
 
-        memoryService.saveMessage(session.getId(), "USER", req.getMessage());
+        ConversationContext ctx = contextBuilder.build(userId, session);
+        List<dev.langchain4j.data.message.ChatMessage> messages =
+                ctx.toLangChainMessages(SYSTEM_PROMPT.formatted(java.time.LocalDate.now().toString()), req.getMessage());
+
+        traceLogger.traceUserMessage(traceCtx, req.getMessage());
 
         StringBuilder fullReply = new StringBuilder();
+        AtomicBoolean emitterDead = new AtomicBoolean(false);
 
         activeStreams.put(session.getId(), emitter);
         activeStreamContents.put(session.getId(), fullReply);
 
         Runnable cleanup = () -> {
+            emitterDead.set(true);
             activeStreams.remove(session.getId());
             activeStreamContents.remove(session.getId());
         };
@@ -135,45 +148,94 @@ public class ChatService {
         if (toolsEnabled) {
             CompletableFuture.runAsync(() -> {
                 try {
-                    // 意图识别：简单闲聊直接跳过工具调用
-                    boolean skipTools = intentClassifier.isSimpleGreeting(req.getMessage());
-                    if (!skipTools) {
-                        long intentStart = System.currentTimeMillis();
-                        IntentClassifier.IntentResult intentResult =
-                                intentClassifier.classify(req.getMessage(), session.getSummary());
-                        traceService.trace(session.getId(), null, ChatTraceService.STAGE_INTENT,
-                                req.getMessage(), intentResult.getIntent().name(),
-                                (int)(System.currentTimeMillis() - intentStart));
-                        skipTools = intentResult.getIntent() == IntentClassifier.Intent.GENERAL_CHAT;
+                    // 1. 噪音过滤 (instant)
+                    if (intentClassifier.route(req.getMessage()).getDecision() == IntentClassifier.RouteDecision.NOISE_SKIP) {
+                        memoryService.saveMessage(session.getId(), "USER", req.getMessage());
+                        traceLogger.trace(traceCtx, "ROUTE", "Noise skip");
+                        completeWithDone(emitter, session);
+                        traceLogger.endTrace(traceCtx);
+                        return;
+                    }
 
-                        // 问题重写（指代消解）
-                        if (!skipTools) {
-                            long rewriteStart = System.currentTimeMillis();
-                            String context = buildConversationContext(session);
-                            QueryRewriter.RewriteResult rewrite = queryRewriter.rewrite(req.getMessage(), context);
-                            traceService.trace(session.getId(), null, ChatTraceService.STAGE_REWRITE,
-                                    req.getMessage(), rewrite.getRewritten(),
-                                    (int)(System.currentTimeMillis() - rewriteStart));
-                            // 如果重写后的查询与原始不同，替换最后一条 UserMessage
+                    // 2. 上下文感知 AI 意图识别 (所有非噪音消息)
+                    long intentStart = System.currentTimeMillis();
+                    String intentContext = ctx.toIntentContextString();
+                    IntentClassifier.IntentResult intentResult;
+                    try {
+                        intentResult = intentClassifier.classify(req.getMessage(), intentContext);
+                    } catch (Exception e) {
+                        log.warn("Intent classification failed, defaulting to GENERAL_CHAT: {}", e.getMessage());
+                        intentResult = new IntentClassifier.IntentResult();
+                    }
+                    int intentDuration = (int)(System.currentTimeMillis() - intentStart);
+                    traceLogger.traceIntentClassification(traceCtx, intentResult.getIntent().name(), intentDuration);
+
+                    // 回写意图结果到上下文
+                    ctx.setLastIntentResult(intentResult);
+
+                    // 保存用户消息（附带意图元数据）
+                    String userMeta = "{\"intent\":\"" + intentResult.getIntent()
+                            + "\",\"confidence\":" + intentResult.getConfidence() + "}";
+                    memoryService.saveMessage(session.getId(), "USER", req.getMessage(), userMeta);
+
+                    // 检查 emitter 是否还活着
+                    if (emitterDead.get()) {
+                        traceLogger.trace(traceCtx, "ABORT", "Emitter dead after intent classification");
+                        traceLogger.endTrace(traceCtx);
+                        return;
+                    }
+
+                    // 3. UNCLEAR + 低置信度 → 主动澄清
+                    if (intentResult.getIntent() == IntentClassifier.Intent.UNCLEAR
+                            && intentResult.getClarification() != null) {
+                        sendClarificationResponse(emitter, session, intentResult.getClarification(), fullReply, traceCtx);
+                        return;
+                    }
+
+                    // 4. 注入意图信息到系统提示
+                    injectIntentContext(messages, intentResult);
+
+                    // 5. 按意图路由
+                    if (IntentClassifier.needsToolResolution(intentResult.getIntent())) {
+                        // 复杂意图: 重写 → 工具/RAG → 流式
+                        long rewriteStart = System.currentTimeMillis();
+                        try {
+                            QueryRewriter.RewriteResult rewrite = queryRewriter.rewrite(req.getMessage(), intentContext);
+                            int rewriteDuration = (int)(System.currentTimeMillis() - rewriteStart);
+                            traceLogger.traceQueryRewrite(traceCtx, req.getMessage(), rewrite.getRewritten(), rewriteDuration);
                             if (!rewrite.getRewritten().equals(req.getMessage())) {
                                 messages.set(messages.size() - 1,
                                         UserMessage.from(rewrite.getRewritten()));
                             }
+                        } catch (Exception e) {
+                            log.warn("Query rewrite failed, using original query: {}", e.getMessage());
+                            traceLogger.trace(traceCtx, "QUERY_REWRITE", "Failed, using original");
                         }
-                    }
 
-                    if (skipTools) {
-                        // 闲聊模式：跳过工具，直接流式
-                        startStreaming(messages, emitter, session, fullReply);
-                    } else {
-                        // Phase 1: 同步工具解析
+                        if (emitterDead.get()) {
+                            traceLogger.trace(traceCtx, "ABORT", "Emitter dead after rewrite");
+                            traceLogger.endTrace(traceCtx);
+                            return;
+                        }
+
                         List<dev.langchain4j.data.message.ChatMessage> resolvedMessages =
-                                resolveToolCalls(new ArrayList<>(messages), emitter);
-                        // Phase 2: 流式输出最终回答
-                        startStreaming(resolvedMessages, emitter, session, fullReply);
+                                resolveToolCalls(new ArrayList<>(messages), emitter, traceCtx);
+                        if (emitterDead.get()) {
+                            traceLogger.trace(traceCtx, "ABORT", "Emitter dead after tool resolution");
+                            traceLogger.endTrace(traceCtx);
+                            return;
+                        }
+                        traceLogger.traceStreamingStart(traceCtx);
+                        startStreaming(resolvedMessages, emitter, session, fullReply, traceCtx, req.getMessage());
+                    } else {
+                        // 简单意图 (GENERAL_CHAT): 直接流式
+                        traceLogger.traceStreamingStart(traceCtx);
+                        startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage());
                     }
                 } catch (Exception e) {
                     log.error("Tool resolution or streaming failed", e);
+                    traceLogger.traceError(traceCtx, "TOOL_RESOLUTION", e);
+                    traceLogger.endTrace(traceCtx);
                     try {
                         if (!fullReply.isEmpty()) {
                             memoryService.saveMessage(session.getId(), "ASSISTANT", fullReply.toString());
@@ -181,17 +243,19 @@ public class ChatService {
                         emitter.send(SseEmitter.event().name("error").data("AI 服务异常"));
                         emitter.complete();
                     } catch (Exception ex) {
-                        emitter.completeWithError(ex);
+                        // emitter 已完成，忽略
                     }
                 }
             });
         } else {
-            // 降级路径：无条件 RAG + 直接流式
+            memoryService.saveMessage(session.getId(), "USER", req.getMessage());
             String ragContext = ragService.retrieveContext(req.getMessage());
             if (ragContext != null && !ragContext.isBlank()) {
+                traceLogger.trace(traceCtx, "RAG_RETRIEVE", "Retrieved " + ragContext.length() + " chars");
                 injectRagContext(messages, ragContext);
             }
-            startStreaming(messages, emitter, session, fullReply);
+            traceLogger.traceStreamingStart(traceCtx);
+            startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage());
         }
 
         return emitter;
@@ -237,7 +301,8 @@ public class ChatService {
     }
 
     private List<dev.langchain4j.data.message.ChatMessage> resolveToolCalls(
-            List<dev.langchain4j.data.message.ChatMessage> messages, SseEmitter emitter) {
+            List<dev.langchain4j.data.message.ChatMessage> messages, SseEmitter emitter,
+            TraceLogger.TraceContext traceCtx) {
         for (int i = 0; i < MAX_TOOL_ITERATIONS; i++) {
             ChatRequest request = ChatRequest.builder()
                     .messages(messages)
@@ -262,7 +327,10 @@ public class ChatService {
             // 执行工具并追加结果
             messages.add(aiMessage);
             for (ToolExecutionRequest req : aiMessage.toolExecutionRequests()) {
+                long toolStart = System.currentTimeMillis();
                 String result = toolService.executeTool(req);
+                int toolDuration = (int)(System.currentTimeMillis() - toolStart);
+                traceLogger.traceToolCall(traceCtx, req.name(), req.arguments(), result, toolDuration);
                 messages.add(ToolExecutionResultMessage.from(req, result));
             }
         }
@@ -285,10 +353,16 @@ public class ChatService {
     // ---- Streaming (Phase 2) ----
 
     private void startStreaming(List<dev.langchain4j.data.message.ChatMessage> messages,
-                                SseEmitter emitter, ChatSession session, StringBuilder fullReply) {
+                                SseEmitter emitter, ChatSession session, StringBuilder fullReply,
+                                TraceLogger.TraceContext traceCtx, String originalUserMessage) {
+        // 使用原子标志防止重复完成 emitter
+        java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
+        long streamStartTime = System.currentTimeMillis();
+
         streamingModel.chat(messages, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
+                if (emitterCompleted.get()) return; // 已完成，跳过
                 fullReply.append(partialResponse);
                 try {
                     // JSON 编码避免 SSE 换行符丢失
@@ -303,6 +377,8 @@ public class ChatService {
                             .data("{\"t\":\"" + jsonSafe + "\"}"));
                 } catch (Exception e) {
                     log.warn("SSE send failed", e);
+                    // 如果发送失败，标记为已完成避免后续重复调用
+                    emitterCompleted.set(true);
                 }
             }
 
@@ -310,39 +386,61 @@ public class ChatService {
             public void onCompleteResponse(ChatResponse response) {
                 String finalReply = fullReply.toString();
                 memoryService.saveMessage(session.getId(), "ASSISTANT", finalReply);
+                int streamDuration = (int)(System.currentTimeMillis() - streamStartTime);
+                traceLogger.traceStreamingComplete(traceCtx, finalReply.length(), streamDuration);
+                traceLogger.endTrace(traceCtx);
+
+                // 自动生成标题 (首条消息)
+                if ("新对话".equals(session.getTitle())) {
+                    String newTitle = generateSessionTitle(originalUserMessage, finalReply);
+                    memoryService.updateSessionTitle(session.getId(), newTitle);
+                    session.setTitle(newTitle);
+                }
+
                 // 异步提取关键词
                 extractAndRecordMentions(session.getTitle(), finalReply);
                 // 异步摘要压缩
                 CompletableFuture.runAsync(() -> {
                     try {
-                        memoryService.compressMemoryIfNeeded(session.getId(), chatModel);
+                        memoryService.compressMemoryIfNeeded(session.getId());
                     } catch (Exception e) {
                         log.warn("Memory compression failed for session {}", session.getId(), e);
                     }
                 });
-                try {
-                    emitter.send(SseEmitter.event()
-                            .name("done")
-                            .data("{\"sessionId\":" + session.getId() + "}"));
-                    emitter.complete();
-                } catch (Exception e) {
-                    log.warn("SSE complete failed", e);
+
+                // 只在第一次调用时完成 emitter
+                if (!emitterCompleted.getAndSet(true)) {
+                    try {
+                        String titleJson = escapeJson(session.getTitle());
+                        emitter.send(SseEmitter.event()
+                                .name("done")
+                                .data("{\"sessionId\":" + session.getId() + ",\"sessionTitle\":\"" + titleJson + "\"}"));
+                        emitter.complete();
+                    } catch (Exception e) {
+                        log.warn("SSE complete failed", e);
+                    }
                 }
             }
 
             @Override
             public void onError(Throwable error) {
                 log.error("Streaming error", error);
+                traceLogger.traceError(traceCtx, "STREAMING", error);
+                traceLogger.endTrace(traceCtx);
                 if (!fullReply.isEmpty()) {
                     memoryService.saveMessage(session.getId(), "ASSISTANT", fullReply.toString());
                 }
-                try {
-                    emitter.send(SseEmitter.event()
-                            .name("error")
-                            .data("AI 服务异常"));
-                    emitter.complete();
-                } catch (Exception e) {
-                    emitter.completeWithError(e);
+
+                // 只在第一次调用时完成 emitter
+                if (!emitterCompleted.getAndSet(true)) {
+                    try {
+                        emitter.send(SseEmitter.event()
+                                .name("error")
+                                .data("AI 服务异常"));
+                        emitter.complete();
+                    } catch (Exception e) {
+                        log.warn("SSE error completion failed", e);
+                    }
                 }
             }
         });
@@ -350,27 +448,66 @@ public class ChatService {
 
     // ---- Message Building ----
 
-    private List<dev.langchain4j.data.message.ChatMessage> buildMessages(
-            ChatSession session, String userMessage) {
-        List<dev.langchain4j.data.message.ChatMessage> messages = new ArrayList<>();
+    /**
+     * 注入意图分析到系统提示，让 AI 知道分类结果后回答更精准
+     */
+    private void injectIntentContext(List<dev.langchain4j.data.message.ChatMessage> messages,
+                                      IntentClassifier.IntentResult intentResult) {
+        if (messages.isEmpty()) return;
+        SystemMessage original = (SystemMessage) messages.get(0);
+        String intentInfo = "\n\n--- 意图分析 ---\n" +
+                "用户意图: " + intentResult.getIntent().name() + "\n" +
+                "置信度: " + (int)(intentResult.getConfidence() * 100) + "%\n" +
+                "提及的实体: " + intentResult.getEntities() + "\n" +
+                "请根据以上意图分析给出合适回答。";
+        messages.set(0, SystemMessage.from(original.text() + intentInfo));
+    }
 
-        StringBuilder systemContent = new StringBuilder(SYSTEM_PROMPT);
-        if (session.getSummary() != null) {
-            systemContent.append("\n\n之前对话的摘要：\n").append(session.getSummary());
+    /**
+     * UNCLEAR 意图时返回澄清问题
+     */
+    private void sendClarificationResponse(SseEmitter emitter, ChatSession session,
+                                            String clarification, StringBuilder fullReply,
+                                            TraceLogger.TraceContext traceCtx) {
+        try {
+            String reply = "我不太确定您的意思，" + clarification;
+            fullReply.append(reply);
+            memoryService.saveMessage(session.getId(), "ASSISTANT", reply);
+            traceLogger.trace(traceCtx, "CLARIFICATION", clarification);
+            traceLogger.endTrace(traceCtx);
+
+            String jsonSafe = reply.replace("\\", "\\\\")
+                    .replace("\"", "\\\"")
+                    .replace("\n", "\\n");
+            emitter.send(SseEmitter.event().name("message").data("{\"t\":\"" + jsonSafe + "\"}"));
+            completeWithDone(emitter, session);
+        } catch (Exception e) {
+            log.warn("Failed to send clarification", e);
         }
-        messages.add(SystemMessage.from(systemContent.toString()));
+    }
 
-        List<ChatMessage> history = memoryService.getRecentMessages(session.getId());
-        for (ChatMessage msg : history) {
-            if ("USER".equals(msg.getRole())) {
-                messages.add(UserMessage.from(msg.getContent()));
-            } else if ("ASSISTANT".equals(msg.getRole())) {
-                messages.add(AiMessage.from(msg.getContent()));
-            }
+    /**
+     * 发送 done 事件并完成 emitter（含 sessionTitle）
+     */
+    private void completeWithDone(SseEmitter emitter, ChatSession session) {
+        try {
+            String titleJson = escapeJson(session.getTitle());
+            emitter.send(SseEmitter.event()
+                    .name("done")
+                    .data("{\"sessionId\":" + session.getId() + ",\"sessionTitle\":\"" + titleJson + "\"}"));
+            emitter.complete();
+        } catch (Exception e) {
+            log.warn("SSE complete failed", e);
         }
+    }
 
-        messages.add(UserMessage.from(userMessage));
-        return messages;
+    private static String escapeJson(String s) {
+        if (s == null) return "";
+        return s.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
     }
 
     private void injectRagContext(List<dev.langchain4j.data.message.ChatMessage> messages, String ragContext) {
@@ -383,25 +520,6 @@ public class ChatService {
     private boolean isFirstMessage(Long sessionId) {
         List<ChatMessage> messages = memoryService.getSessionMessagesDirectly(sessionId);
         return messages == null || messages.isEmpty();
-    }
-
-    /**
-     * 构建简短的对话上下文文本（用于意图识别和问题重写）
-     */
-    private String buildConversationContext(ChatSession session) {
-        StringBuilder context = new StringBuilder();
-        if (session.getSummary() != null && !session.getSummary().isBlank()) {
-            context.append("摘要: ").append(session.getSummary()).append("\n");
-        }
-        List<ChatMessage> recent = memoryService.getRecentMessages(session.getId());
-        int start = Math.max(0, recent.size() - 6); // 最近 3 轮对话
-        for (int i = start; i < recent.size(); i++) {
-            ChatMessage msg = recent.get(i);
-            context.append(msg.getRole()).append(": ").append(
-                    msg.getContent().length() > 200 ? msg.getContent().substring(0, 200) : msg.getContent()
-            ).append("\n");
-        }
-        return context.toString();
     }
 
     private String generateSessionTitle(String userMessage, String aiReply) {

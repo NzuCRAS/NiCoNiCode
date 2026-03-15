@@ -6,15 +6,13 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 @Data
-@TableName("chat_message")
-public class ChatMessage {
+@TableName("session_summary")
+public class SessionSummary {
     @TableId(type = IdType.AUTO)
     private Long id;
     private Long sessionId;
-    private String role;     // USER, ASSISTANT, SYSTEM
+    private Integer version;
     private String content;
-    private Integer tokenCount;
-    private String metadata;
+    private String triggerType;
     private LocalDateTime createdAt;
-    private LocalDateTime deletedAt;
 }

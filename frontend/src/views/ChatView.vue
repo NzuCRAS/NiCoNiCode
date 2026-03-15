@@ -129,11 +129,7 @@ const editContent = ref('')
 const copiedMessageIndex = ref<number | null>(null)
 
 const isStreaming = computed(() => {
-  // 如果最后一条消息是 ASSISTANT 且 content 非空，说明正在流式生成
-  const msgs = chatStore.messages
-  if (msgs.length === 0) return false
-  const last = msgs[msgs.length - 1]
-  return last.role === 'ASSISTANT' && last.content.length > 0 && chatStore.isCurrentSessionLoading
+  return chatStore.streamingStarted && chatStore.isCurrentSessionLoading
 })
 
 onMounted(async () => {

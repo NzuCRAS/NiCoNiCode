@@ -24,6 +24,9 @@
             <router-link v-if="getTechName(reports[0].trackedTechId)" :to="`/tech/${reports[0].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[0].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[0].publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (reports[0].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[0].publishedAt)">
+              {{ calcCompositeScore(reports[0]).toFixed(0) }}
+            </span>
           </div>
           <p class="drop-cap">{{ stripContent(reports[0].content, 300) }}</p>
         </router-link>
@@ -36,6 +39,7 @@
               <router-link :to="`/reports/${r.id}`" class="brief-link">
                 <strong>{{ r.title }}</strong>
                 <span v-if="r.newVersion" class="badge-version-sm">{{ r.newVersion }}</span>
+                <span class="badge-score-sm">{{ calcCompositeScore(r).toFixed(0) }}</span>
               </router-link>
             </li>
           </ul>
@@ -49,6 +53,9 @@
             <router-link v-if="getTechName(r.trackedTechId)" :to="`/tech/${r.trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(r.trackedTechId) }}</router-link>
             <span>{{ formatDate(r.publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (r.techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(r.publishedAt)">
+              {{ calcCompositeScore(r).toFixed(0) }}
+            </span>
           </div>
           <p>{{ stripContent(r.content, 120) }}</p>
         </router-link>
@@ -61,6 +68,9 @@
             <router-link v-if="getTechName(reports[4].trackedTechId)" :to="`/tech/${reports[4].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[4].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[4].publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (reports[4].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[4].publishedAt)">
+              {{ calcCompositeScore(reports[4]).toFixed(0) }}
+            </span>
           </div>
           <p>{{ stripContent(reports[4].content, 200) }}</p>
         </router-link>
@@ -73,6 +83,9 @@
             <router-link v-if="getTechName(reports[5].trackedTechId)" :to="`/tech/${reports[5].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[5].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[5].publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (reports[5].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[5].publishedAt)">
+              {{ calcCompositeScore(reports[5]).toFixed(0) }}
+            </span>
           </div>
           <p>{{ stripContent(reports[5].content, 120) }}</p>
         </router-link>
@@ -85,6 +98,9 @@
             <router-link v-if="getTechName(r.trackedTechId)" :to="`/tech/${r.trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(r.trackedTechId) }}</router-link>
             <span>{{ formatDate(r.publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (r.techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(r.publishedAt)">
+              {{ calcCompositeScore(r).toFixed(0) }}
+            </span>
           </div>
           <p>{{ stripContent(r.content, 120) }}</p>
         </router-link>
@@ -97,6 +113,9 @@
             <router-link v-if="getTechName(reports[9].trackedTechId)" :to="`/tech/${reports[9].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[9].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[9].publishedAt) }}</span>
+            <span class="badge-score" :title="'技术指数 ' + (reports[9].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[9].publishedAt)">
+              {{ calcCompositeScore(reports[9]).toFixed(0) }}
+            </span>
           </div>
           <div class="multi-column">
             <p>{{ stripContent(reports[9].content, 250) }}</p>
@@ -107,19 +126,20 @@
       <!-- 报脚 -->
       <div class="np-footer">
         <span>&copy; NiCoNiCode · 技术追踪平台</span>
-        <span>AI 驱动 · 自动追踪</span>
+        <span>每小时自动更新 · AI 驱动</span>
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import api from '../services/api'
 
 const reports = ref<any[]>([])
 const techs = ref<any[]>([])
 const loading = ref(true)
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const todayStr = computed(() => {
   const d = new Date()
@@ -159,14 +179,25 @@ function formatDate(date: string) {
   return new Date(date).toLocaleDateString('zh-CN')
 }
 
-onMounted(async () => {
-  try {
-    const [techsRes] = await Promise.all([
-      api.get('/tracker/techs') as any
-    ])
-    techs.value = techsRes.data || []
-  } catch { /* ignore */ }
+/**
+ * 计算时间指数: 满分 840，每小时降 5 分，最低 0
+ */
+function calcTimeIndex(publishedAt: string): number {
+  if (!publishedAt) return 0
+  const hours = (Date.now() - new Date(publishedAt).getTime()) / 3600000
+  return Math.max(0, Math.round(840 - hours * 5))
+}
 
+/**
+ * 计算综合指数: techIndex * 0.6 + timeIndex * 0.4
+ */
+function calcCompositeScore(report: any): number {
+  const techIndex = report.techIndex ?? 500
+  const timeIndex = calcTimeIndex(report.publishedAt)
+  return techIndex * 0.6 + timeIndex * 0.4
+}
+
+async function fetchReports() {
   try {
     const res: any = await api.get('/tracker/reports/by-score', { params: { page: 1, size: 15 } })
     reports.value = res.data?.records || []
@@ -175,14 +206,33 @@ onMounted(async () => {
       const res: any = await api.get('/tracker/reports', { params: { page: 1, size: 15 } })
       reports.value = res.data?.records || []
     } catch { /* ignore */ }
-  } finally {
-    loading.value = false
+  }
+}
+
+onMounted(async () => {
+  try {
+    const techsRes: any = await api.get('/tracker/techs')
+    techs.value = techsRes.data || []
+  } catch { /* ignore */ }
+
+  await fetchReports()
+  loading.value = false
+
+  // 每小时自动刷新并按综合指数重排
+  refreshTimer = setInterval(async () => {
+    await fetchReports()
+  }, 3600000) // 1 小时
+})
+
+onUnmounted(() => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
   }
 })
 </script>
 
 <style scoped>
-/* 报纸容器 — 白底、圆角、阴影，与站点风格一致 */
 .newspaper {
   max-width: 1200px;
   margin: 0 auto;
@@ -193,7 +243,6 @@ onMounted(async () => {
   border: 1px solid #e5e7eb;
 }
 
-/* 报头 */
 .masthead {
   text-align: center;
   border-bottom: 3px double #6366f1;
@@ -236,7 +285,6 @@ onMounted(async () => {
   margin-top: 0.5rem;
 }
 
-/* 网格 */
 .news-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -320,7 +368,6 @@ onMounted(async () => {
   line-height: 1.7;
 }
 
-/* 首字下沉 */
 .drop-cap::first-letter {
   font-size: 3.5em;
   float: left;
@@ -331,7 +378,6 @@ onMounted(async () => {
   font-family: 'Georgia', 'Times New Roman', serif;
 }
 
-/* 版本徽章 */
 .badge-version {
   background: #ecfdf5;
   color: #059669;
@@ -364,7 +410,28 @@ onMounted(async () => {
   background: #c7d2fe;
 }
 
-/* 多栏 */
+/* 综合指数徽章 */
+.badge-score {
+  background: #fef3c7;
+  color: #b45309;
+  padding: 1px 8px;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-style: normal;
+  font-weight: 600;
+  cursor: help;
+}
+
+.badge-score-sm {
+  background: #fef3c7;
+  color: #b45309;
+  padding: 0 5px;
+  border-radius: 9999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-left: 0.375rem;
+}
+
 .multi-column {
   column-count: 2;
   column-gap: 1.75rem;
@@ -378,7 +445,6 @@ onMounted(async () => {
   text-indent: 2em;
 }
 
-/* 简报列表 */
 .brief-list {
   list-style: none;
   margin: 0.5rem 0;
@@ -419,7 +485,6 @@ onMounted(async () => {
   margin-right: 0.375rem;
 }
 
-/* 报脚 */
 .np-footer {
   border-top: 3px double #6366f1;
   margin-top: 1.5rem;
@@ -431,7 +496,6 @@ onMounted(async () => {
   color: #6b7280;
 }
 
-/* 响应式 */
 @media (max-width: 800px) {
   .news-grid {
     grid-template-columns: 1fr;

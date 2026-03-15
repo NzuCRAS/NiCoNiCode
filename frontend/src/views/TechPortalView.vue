@@ -54,6 +54,10 @@
                     {{ report.newVersion }}
                   </span>
                   <span class="text-xs text-gray-400">{{ formatDate(report.publishedAt) }}</span>
+                  <span class="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-semibold"
+                    :title="'techIndex=' + (report.techIndex || 500) + ' timeIndex=' + calcTimeIndex(report.publishedAt)">
+                    {{ calcCompositeScore(report).toFixed(0) }}
+                  </span>
                 </div>
                 <h3 class="font-semibold text-gray-900 mb-1">{{ report.title }}</h3>
                 <p class="text-sm text-gray-500 line-clamp-2">{{ stripMarkdown(report.content || '').substring(0, 120) }}</p>
@@ -124,5 +128,17 @@ function formatDate(date: string) {
 function formatDateTime(date: string) {
   if (!date) return ''
   return new Date(date).toLocaleString('zh-CN')
+}
+
+function calcTimeIndex(publishedAt: string): number {
+  if (!publishedAt) return 0
+  const hours = (Date.now() - new Date(publishedAt).getTime()) / 3600000
+  return Math.max(0, Math.round(840 - hours * 5))
+}
+
+function calcCompositeScore(report: any): number {
+  const techIndex = report.techIndex ?? 500
+  const timeIndex = calcTimeIndex(report.publishedAt)
+  return techIndex * 0.6 + timeIndex * 0.4
 }
 </script>

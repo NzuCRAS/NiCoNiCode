@@ -2,6 +2,7 @@ package com.niconicode.agent.tracker.agent;
 
 import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.entity.TrackedTech;
+import com.niconicode.agent.chat.service.TraceLogger;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,18 +20,30 @@ import java.util.stream.Collectors;
 public class WriterAgent {
 
     private final ChatLanguageModel chatModel;
+    private final TraceLogger traceLogger;
 
     /**
      * 根据搜索结果撰写技术报道
      */
-    public String write(TrackedTech tech, SearchAgent.SearchResult searchResult) {
+    public String write(TrackedTech tech, SearchAgent.SearchResult searchResult,
+                        TraceLogger.TraceContext traceCtx) {
         String prompt = buildPrompt(tech, searchResult);
+        traceLogger.trace(traceCtx, "WRITER_PROMPT_BUILT", "contextLength=" + prompt.length());
 
         try {
+            long aiStart = System.currentTimeMillis();
             String content = chatModel.chat(prompt);
-            return cleanMarkdownContent(content);
+            int aiDuration = (int)(System.currentTimeMillis() - aiStart);
+            traceLogger.trace(traceCtx, "WRITER_AI_CALL", "outputLength=" + content.length()
+                    + ", duration=" + aiDuration + "ms");
+
+            String cleaned = cleanMarkdownContent(content);
+            traceLogger.trace(traceCtx, "WRITER_CONTENT_CLEAN",
+                    "before=" + content.length() + ", after=" + cleaned.length());
+            return cleaned;
         } catch (Exception e) {
             log.error("WriterAgent failed for {}", tech.getName(), e);
+            traceLogger.traceError(traceCtx, "WRITER_AI_CALL", e);
             throw new RuntimeException("报道撰写失败: " + e.getMessage());
         }
     }
@@ -81,24 +94,53 @@ public class WriterAgent {
         };
 
         return """
-                你是一位技术分析师，负责撰写技术更新分析报告。
+                你是一位资深技术分析师，负责撰写详尽、充实、有深度的技术更新分析报告。
+                你的读者是开发者和技术决策者，他们需要全面了解这次更新的每一个细节。
 
                 严格禁止：
                 - 不要使用"业内专家指出"、"据了解"、"值得一提的是"、"值得关注的是"等新闻腔调
                 - 不要虚构任何信息，所有内容必须基于提供的原始数据
                 - 不要使用修辞性的开场或结尾
                 - 不要使用"笔者"、"本报"等自称
+                - 不要写空洞的总结段落
 
-                必须包含：
-                - 基于事实的技术分析和影响评估
-                - "AI 建议"段落（如升级建议、兼容性注意事项）
-                - "技术背景"段落（该技术的定位和生态）
-                - 所有来源链接
+                必须包含的内容段落（每个段落都要有实质内容，不能敷衍）：
+
+                ## 版本概要
+                简明扼要地说明本次更新的版本号、发布日期、更新类型（大版本/小版本/补丁）。
+
+                ## 核心变更详解
+                **逐条列出**本次更新的所有变更点，每个变更点都要：
+                - 说明变更的具体内容（是什么）
+                - 说明变更的技术原因（为什么）
+                - 说明对使用者的影响（影响谁、怎么影响）
+                如果 Release Notes 中列出了多个变更，**每一个都要讲解**，不能遗漏或笼统带过。
+
+                ## 破坏性变更与迁移指南
+                如果存在 Breaking Changes，必须明确列出并给出迁移建议。
+                如果没有，也要明确说明"本次更新无破坏性变更"。
+
+                ## 性能与安全改进
+                列出本次更新中涉及的性能优化和安全修复（如有）。
+
+                ## AI 建议
+                - 是否建议立即升级，还是观望
+                - 升级时需要注意的兼容性问题
+                - 对不同规模项目的建议（个人项目 vs 生产环境）
+
+                ## 技术背景
+                简要介绍该技术在生态中的定位、主要竞品、适用场景。
+
+                ## 来源链接
+                列出所有来源 URL，使用 Markdown 链接格式。
 
                 格式要求：
-                - Markdown 格式
-                - 结构：版本概要 → 更新详解 → 影响分析 → AI 建议 → 技术背景 → 来源链接
-                - 直接输出 Markdown 内容，不要用 ```markdown ``` 包裹
+                - Markdown 格式，直接输出内容，不要用 ```markdown ``` 包裹
+                - 标题使用 ## 二级标题
+                - 重点内容使用**加粗**
+                - 变更列表使用有序或无序列表
+                - 代码或配置变更使用代码块
+                - 内容要充实详尽，不要惜字如金
 
                 数据充分度说明: %s
 

@@ -9,6 +9,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -18,6 +21,31 @@ import java.util.stream.Collectors;
 public class TechTrackerTools {
 
     private final TrackerService trackerService;
+
+    @Tool("按日期范围查询已发布的技术报道，用于回答'今天/最近/某天有什么更新'等时间相关问题")
+    public String getReportsByDate(
+            @P("起始日期，格式 yyyy-MM-dd") String startDate,
+            @P("结束日期，格式 yyyy-MM-dd，查询单日时与起始日期相同") String endDate) {
+        log.info("Tool call: getReportsByDate({}, {})", startDate, endDate);
+        try {
+            LocalDate start = LocalDate.parse(startDate);
+            LocalDate end = LocalDate.parse(endDate);
+            LocalDateTime startTime = start.atStartOfDay();
+            LocalDateTime endTime = end.plusDays(1).atStartOfDay();
+
+            List<TechReport> reports = trackerService.getReportsByDateRange(startTime, endTime, 10);
+            if (reports.isEmpty()) {
+                return "在 " + startDate + " 至 " + endDate + " 期间没有已发布的技术报道";
+            }
+            return reports.stream()
+                    .map(r -> "【" + r.getTitle() + "】(" + r.getPublishedAt() + ")"
+                            + "\n技术指数: " + (r.getTechIndex() != null ? r.getTechIndex() : "N/A")
+                            + "\n" + (r.getChangeSummary() != null ? r.getChangeSummary() : ""))
+                    .collect(Collectors.joining("\n\n---\n\n"));
+        } catch (DateTimeParseException e) {
+            return "日期格式错误，请使用 yyyy-MM-dd 格式（如 2026-03-15）";
+        }
+    }
 
     @Tool("按关键词搜索已发布的技术报道")
     public String searchReports(@P("搜索关键词") String keyword) {

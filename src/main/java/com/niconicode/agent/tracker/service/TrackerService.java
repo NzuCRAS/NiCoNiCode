@@ -13,6 +13,7 @@ import com.niconicode.agent.tracker.mapper.TrackedTechMapper;
 import com.niconicode.agent.tracker.agent.SearchAgent;
 import com.niconicode.agent.tracker.agent.WriterAgent;
 import com.niconicode.agent.tracker.agent.ReviewerAgent;
+import com.niconicode.agent.chat.service.TraceLogger;
 import com.niconicode.common.exception.BusinessException;
 import com.niconicode.knowledge.dto.KnowledgeDocReq;
 import com.niconicode.knowledge.entity.KnowledgeDoc;
@@ -44,6 +45,7 @@ public class TrackerService {
     private final SearchAgent searchAgent;
     private final WriterAgent writerAgent;
     private final ReviewerAgent reviewerAgent;
+    private final TraceLogger traceLogger;
 
     @Value("${ai.hot-topic.promotion-threshold:10}")
     private int promotionThreshold;
@@ -224,24 +226,40 @@ public class TrackerService {
 
         if (tech.getGithubRepo() == null || tech.getGithubRepo().isBlank()) return;
 
+        // 初始化追踪上下文
+        TraceLogger.TraceContext traceCtx = traceLogger.startTrace(-1L, techId);
+
         try {
+            traceLogger.trace(traceCtx, "TRACKER_START", "tech=" + tech.getName() + ", repo=" + tech.getGithubRepo());
+
             // Stage 1: SearchAgent — 多渠道信息搜集
-            SearchAgent.SearchResult searchResult = searchAgent.search(tech);
+            long searchStart = System.currentTimeMillis();
+            SearchAgent.SearchResult searchResult = searchAgent.search(tech, traceCtx);
+            int searchDuration = (int)(System.currentTimeMillis() - searchStart);
+
             if (!searchResult.isHasUpdate()) {
-                log.debug("No update detected for {}", tech.getName());
+                traceLogger.trace(traceCtx, "SEARCH_AGENT", "No update detected, duration=" + searchDuration + "ms");
                 tech.setLastCheckedAt(LocalDateTime.now());
                 techMapper.updateById(tech);
+                traceLogger.endTrace(traceCtx);
                 return;
             }
 
-            log.info("Update detected for {} ({} mode): {}",
-                    tech.getName(), searchResult.getUpdateMode(), searchResult.getDetectedVersion());
+            traceLogger.trace(traceCtx, "SEARCH_AGENT", "Update detected: " + searchResult.getDetectedVersion()
+                    + " (" + searchResult.getUpdateMode() + "), sources=" + searchResult.getSourceUrls().size()
+                    + ", duration=" + searchDuration + "ms");
 
             // Stage 2: WriterAgent — 撰写高质量报道
-            String reportContent = writerAgent.write(tech, searchResult);
+            long writerStart = System.currentTimeMillis();
+            String reportContent = writerAgent.write(tech, searchResult, traceCtx);
+            int writerDuration = (int)(System.currentTimeMillis() - writerStart);
+            traceLogger.trace(traceCtx, "WRITER_AGENT", "Report generated, length=" + reportContent.length()
+                    + ", duration=" + writerDuration + "ms");
 
             // Stage 3: ReviewerAgent — 审核 + 评分 + 发布决策
-            ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, reportContent, searchResult);
+            long reviewStart = System.currentTimeMillis();
+            ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, reportContent, searchResult, traceCtx);
+            int reviewDuration = (int)(System.currentTimeMillis() - reviewStart);
 
             if (review.isApproved()) {
                 // 构建并发布报道
@@ -263,25 +281,27 @@ public class TrackerService {
                 reportMapper.insert(report);
 
                 // 同步到知识库
-                syncToKnowledge(report, tech);
+                syncToKnowledge(report, tech, traceCtx);
 
-                log.info("Published report for {} {} (tech index: {}, quality: {})",
-                        tech.getName(), searchResult.getDetectedVersion(),
-                        review.getTechIndex(), review.getQualityNotes());
+                traceLogger.trace(traceCtx, "REVIEWER_AGENT", "Report approved: techIndex=" + review.getTechIndex()
+                        + ", published=true, duration=" + reviewDuration + "ms");
+                traceLogger.trace(traceCtx, "TRACKER_SUCCESS", "Report published: " + report.getId());
             } else {
-                log.info("Report for {} rejected by ReviewerAgent: {}",
-                        tech.getName(), review.getRejectionReason());
+                traceLogger.trace(traceCtx, "REVIEWER_AGENT", "Report rejected: " + review.getRejectionReason()
+                        + ", duration=" + reviewDuration + "ms");
             }
 
             // 更新追踪状态
-            updateTrackingState(tech, searchResult);
+            updateTrackingState(tech, searchResult, traceCtx);
 
         } catch (Exception e) {
             log.error("Multi-agent pipeline failed for {}", tech.getName(), e);
+            traceLogger.traceError(traceCtx, "TRACKER_PIPELINE", e);
+        } finally {
+            tech.setLastCheckedAt(LocalDateTime.now());
+            techMapper.updateById(tech);
+            traceLogger.endTrace(traceCtx);
         }
-
-        tech.setLastCheckedAt(LocalDateTime.now());
-        techMapper.updateById(tech);
     }
 
     private String getModeLabel(String mode) {
@@ -300,7 +320,8 @@ public class TrackerService {
                 .collect(java.util.stream.Collectors.joining(",", "[", "]"));
     }
 
-    private void syncToKnowledge(TechReport report, TrackedTech tech) {
+    private void syncToKnowledge(TechReport report, TrackedTech tech,
+                                TraceLogger.TraceContext traceCtx) {
         try {
             KnowledgeDocReq docReq = new KnowledgeDocReq();
             docReq.setTitle(report.getTitle());
@@ -309,12 +330,15 @@ public class TrackerService {
             docReq.setSourceId(report.getId());
             docReq.setTags(tech.getName() + "," + tech.getCategory());
             knowledgeService.createDoc(docReq);
+            traceLogger.trace(traceCtx, "KNOWLEDGE_SYNC", "synced reportId=" + report.getId());
         } catch (Exception e) {
             log.warn("Failed to sync report to knowledge base: {}", e.getMessage());
+            traceLogger.trace(traceCtx, "KNOWLEDGE_SYNC", "failed: " + e.getMessage());
         }
     }
 
-    private void updateTrackingState(TrackedTech tech, SearchAgent.SearchResult searchResult) {
+    private void updateTrackingState(TrackedTech tech, SearchAgent.SearchResult searchResult,
+                                     TraceLogger.TraceContext traceCtx) {
         if ("RELEASE".equals(searchResult.getUpdateMode())
                 || "TAG".equals(searchResult.getUpdateMode())) {
             tech.setLastKnownVersion(searchResult.getDetectedVersion());
@@ -328,6 +352,8 @@ public class TrackerService {
                 && !searchResult.getRecentCommits().isEmpty()) {
             tech.setLastKnownCommitSha(searchResult.getRecentCommits().get(0).getSha());
         }
+        traceLogger.trace(traceCtx, "TRACKING_STATE_UPDATE",
+                "version=" + tech.getLastKnownVersion() + ", mode=" + tech.getTrackingMode());
     }
 
     /**
@@ -527,6 +553,20 @@ public class TrackerService {
                 .eq(TechReport::getStatus, "PUBLISHED")
                 .orderByDesc(TechReport::getPublishedAt);
         return reportMapper.selectPage(new Page<>(page, size), wrapper);
+    }
+
+    /**
+     * 按日期范围查询已发布报道
+     */
+    public List<TechReport> getReportsByDateRange(LocalDateTime start, LocalDateTime end, int limit) {
+        return reportMapper.selectList(
+                new LambdaQueryWrapper<TechReport>()
+                        .eq(TechReport::getStatus, "PUBLISHED")
+                        .ge(TechReport::getPublishedAt, start)
+                        .le(TechReport::getPublishedAt, end)
+                        .orderByDesc(TechReport::getPublishedAt)
+                        .last("LIMIT " + limit)
+        );
     }
 
     /**

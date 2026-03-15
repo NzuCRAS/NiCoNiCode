@@ -58,6 +58,10 @@
             <div class="flex items-center space-x-3 text-xs text-gray-400 shrink-0">
               <span v-if="r.newVersion" class="bg-green-50 text-green-600 px-1.5 py-0.5 rounded">{{ r.newVersion }}</span>
               <span>{{ formatDate(r.publishedAt) }}</span>
+              <span class="bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded font-semibold"
+                :title="'techIndex=' + (r.techIndex || 500) + ' timeIndex=' + calcTimeIndex(r.publishedAt)">
+                {{ calcCompositeScore(r).toFixed(0) }}
+              </span>
             </div>
           </div>
         </router-link>
@@ -91,5 +95,17 @@ onMounted(async () => {
 function formatDate(date: string) {
   if (!date) return ''
   return new Date(date).toLocaleDateString('zh-CN')
+}
+
+function calcTimeIndex(publishedAt: string): number {
+  if (!publishedAt) return 0
+  const hours = (Date.now() - new Date(publishedAt).getTime()) / 3600000
+  return Math.max(0, Math.round(840 - hours * 5))
+}
+
+function calcCompositeScore(report: any): number {
+  const techIndex = report.techIndex ?? 500
+  const timeIndex = calcTimeIndex(report.publishedAt)
+  return techIndex * 0.6 + timeIndex * 0.4
 }
 </script>

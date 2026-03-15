@@ -389,7 +389,7 @@ const users = ref<any[]>([])
 const reportFilter = reactive({ status: '' })
 const errataFilter = reactive({ status: '' })
 const newCategory = reactive({ name: '', description: '', sortOrder: 0 })
-const trackerFrequency = ref(360)
+const trackerFrequency = ref(60)
 const checkingNow = ref(false)
 
 const editModal = reactive({
@@ -445,7 +445,7 @@ async function loadTrackedTechs() {
   // 同时加载频率
   try {
     const res: any = await api.get('/admin/tracker/frequency')
-    trackerFrequency.value = res.data?.minutes || 360
+    trackerFrequency.value = res.data?.minutes || 60
   } catch { /* ignore */ }
 }
 
