@@ -52,7 +52,7 @@ public class ChatService {
     private final ConcurrentHashMap<Long, SseEmitter> activeStreams = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, StringBuilder> activeStreamContents = new ConcurrentHashMap<>();
 
-    private static final int MAX_TOOL_ITERATIONS = 5;
+    private static final int MAX_TOOL_ITERATIONS = 2;
 
     private static final String SYSTEM_PROMPT = """
             你是 NiCoNiCode 的 AI 技术助手，专注于编程和技术领域的问答。
@@ -67,6 +67,7 @@ public class ChatService {
             - 代码使用 Markdown 格式
             - 不确定的内容要如实说明
             - 当用户询问特定技术的版本、更新、文档时，优先使用工具获取准确信息
+            - 如果系统提示中包含"知识库参考资料"，请综合利用这些背景知识，工具的实时数据优先级更高
             - 简单的问候或通用问题无需使用工具，直接回答即可
             - 使用工具搜索到的内容要注明来源
             - 当用户说"今天"、"最近"等时间词时，以当前日期为基准
@@ -75,6 +76,8 @@ public class ChatService {
     public ChatResp processMessage(Long userId, ChatReq req) {
         ChatSession session = memoryService.getOrCreateSession(userId, req.getSessionId(), req.getMessage());
         boolean isFirstMessage = isFirstMessage(session.getId());
+
+        TraceLogger.TraceContext traceCtx = traceLogger.startTrace(userId, session.getId());
 
         ConversationContext ctx = contextBuilder.build(userId, session);
         List<dev.langchain4j.data.message.ChatMessage> messages =
@@ -95,16 +98,30 @@ public class ChatService {
         } catch (Exception e) {
             log.error("AI chat failed", e);
             reply = "抱歉，AI 服务暂时不可用，请稍后重试。";
+            traceLogger.traceError(traceCtx, "CHAT_NON_STREAM", e);
         }
 
         memoryService.saveMessage(session.getId(), "USER", req.getMessage());
         memoryService.saveMessage(session.getId(), "ASSISTANT", reply);
+
+        // 异步摘要压缩（非流式也执行，保持行为一致）
+        CompletableFuture.runAsync(() -> {
+            try {
+                traceLogger.trace(traceCtx, "MEMORY_COMPRESS", "start");
+                memoryService.compressMemoryIfNeeded(session.getId(), traceCtx);
+                traceLogger.trace(traceCtx, "MEMORY_COMPRESS", "done");
+            } catch (Exception e) {
+                traceLogger.traceError(traceCtx, "MEMORY_COMPRESS", e);
+            }
+        });
 
         String sessionTitle = session.getTitle();
         if (isFirstMessage && "新对话".equals(sessionTitle)) {
             sessionTitle = generateSessionTitle(req.getMessage(), reply);
             memoryService.updateSessionTitle(session.getId(), sessionTitle);
         }
+
+        traceLogger.endTrace(traceCtx);
 
         return ChatResp.builder()
                 .sessionId(session.getId())
@@ -197,10 +214,11 @@ public class ChatService {
 
                     // 5. 按意图路由
                     if (IntentClassifier.needsToolResolution(intentResult.getIntent())) {
-                        // 复杂意图: 重写 → 工具/RAG → 流式
+                        // 复杂意图: 重写 → [工具调用 + RAG 并行] → 流式
                         long rewriteStart = System.currentTimeMillis();
+                        QueryRewriter.RewriteResult rewrite = null;
                         try {
-                            QueryRewriter.RewriteResult rewrite = queryRewriter.rewrite(req.getMessage(), intentContext);
+                            rewrite = queryRewriter.rewrite(req.getMessage(), intentContext);
                             int rewriteDuration = (int)(System.currentTimeMillis() - rewriteStart);
                             traceLogger.traceQueryRewrite(traceCtx, req.getMessage(), rewrite.getRewritten(), rewriteDuration);
                             if (!rewrite.getRewritten().equals(req.getMessage())) {
@@ -218,17 +236,67 @@ public class ChatService {
                             return;
                         }
 
-                        List<dev.langchain4j.data.message.ChatMessage> resolvedMessages =
-                                resolveToolCalls(new ArrayList<>(messages), emitter, traceCtx);
+                        // RAG 与工具调用并行：RAG 检索在后台线程执行，工具调用在当前线程执行
+                        final String ragQuery = rewrite != null ? rewrite.getRewritten() : req.getMessage();
+                        final String intentName = intentResult.getIntent().name();
+                        CompletableFuture<String> ragFuture = CompletableFuture.supplyAsync(() -> {
+                            try {
+                                long ragStart = System.currentTimeMillis();
+                                String ragCtx = ragService.retrieveContext(ragQuery, intentName);
+                                int ragDuration = (int)(System.currentTimeMillis() - ragStart);
+                                if (ragCtx != null && !ragCtx.isBlank()) {
+                                    traceLogger.trace(traceCtx, "RAG_RETRIEVE",
+                                            "intent=" + intentName + ", chars=" + ragCtx.length() + ", duration=" + ragDuration + "ms");
+                                } else {
+                                    traceLogger.trace(traceCtx, "RAG_RETRIEVE", "no results, duration=" + ragDuration + "ms");
+                                }
+                                return ragCtx;
+                            } catch (Exception e) {
+                                log.warn("RAG retrieval failed: {}", e.getMessage());
+                                traceLogger.trace(traceCtx, "RAG_RETRIEVE", "failed: " + e.getMessage());
+                                return "";
+                            }
+                        });
+
+            traceLogger.trace(traceCtx, "PIPELINE", "before_tool_resolution");
+                        // 工具调用在当前线程同步执行
+            long toolResolveStart = System.currentTimeMillis();
+            List<dev.langchain4j.data.message.ChatMessage> resolvedMessages =
+                resolveToolCalls(new ArrayList<>(messages), emitter, traceCtx);
+            int toolResolveDuration = (int)(System.currentTimeMillis() - toolResolveStart);
+            traceLogger.trace(traceCtx, "TOOL_RESOLVE", "duration=" + toolResolveDuration + "ms");
+
                         if (emitterDead.get()) {
                             traceLogger.trace(traceCtx, "ABORT", "Emitter dead after tool resolution");
                             traceLogger.endTrace(traceCtx);
                             return;
                         }
+
+                        // 等待 RAG 结果（工具调用通常比 RAG 慢，此处通常已完成）
+                        long ragWaitStart = System.currentTimeMillis();
+                        String ragContext = ragFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                        int ragWaitDuration = (int)(System.currentTimeMillis() - ragWaitStart);
+                        traceLogger.trace(traceCtx, "RAG_WAIT", "duration=" + ragWaitDuration + "ms");
+                        if (ragContext != null && !ragContext.isBlank()) {
+                            injectRagContext(resolvedMessages, ragContext);
+                        }
+
                         traceLogger.traceStreamingStart(traceCtx);
                         startStreaming(resolvedMessages, emitter, session, fullReply, traceCtx, req.getMessage());
                     } else {
-                        // 简单意图 (GENERAL_CHAT): 直接流式
+                        // 简单意图 (GENERAL_CHAT): RAG 检索后流式输出
+                        try {
+                            long ragStart = System.currentTimeMillis();
+                            String ragContext = ragService.retrieveContext(req.getMessage(), intentResult.getIntent().name());
+                            int ragDuration = (int)(System.currentTimeMillis() - ragStart);
+                            if (ragContext != null && !ragContext.isBlank()) {
+                                traceLogger.trace(traceCtx, "RAG_RETRIEVE",
+                                        "GENERAL_CHAT, chars=" + ragContext.length() + ", duration=" + ragDuration + "ms");
+                                injectRagContext(messages, ragContext);
+                            }
+                        } catch (Exception e) {
+                            log.warn("RAG retrieval failed for GENERAL_CHAT: {}", e.getMessage());
+                        }
                         traceLogger.traceStreamingStart(traceCtx);
                         startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage());
                     }
@@ -249,7 +317,7 @@ public class ChatService {
             });
         } else {
             memoryService.saveMessage(session.getId(), "USER", req.getMessage());
-            String ragContext = ragService.retrieveContext(req.getMessage());
+            String ragContext = ragService.retrieveContext(req.getMessage(), null);
             if (ragContext != null && !ragContext.isBlank()) {
                 traceLogger.trace(traceCtx, "RAG_RETRIEVE", "Retrieved " + ragContext.length() + " chars");
                 injectRagContext(messages, ragContext);
@@ -303,14 +371,43 @@ public class ChatService {
     private List<dev.langchain4j.data.message.ChatMessage> resolveToolCalls(
             List<dev.langchain4j.data.message.ChatMessage> messages, SseEmitter emitter,
             TraceLogger.TraceContext traceCtx) {
+        final long totalStart = System.currentTimeMillis();
+        // 总预算 10s，单次 LLM 调用 8s 硬超时（防止单次调用拖垮整个预算）
+        final int maxTotalMs = 10_000;
+        final int perCallTimeoutMs = 8_000;
+
         for (int i = 0; i < MAX_TOOL_ITERATIONS; i++) {
+            long elapsed = System.currentTimeMillis() - totalStart;
+            if (elapsed > maxTotalMs) {
+                traceLogger.trace(traceCtx, "TOOL_RESOLVE", "budget_exceeded, stop resolving tools");
+                break;
+            }
+
             ChatRequest request = ChatRequest.builder()
                     .messages(messages)
                     .parameters(DefaultChatRequestParameters.builder()
                             .toolSpecifications(toolService.getToolSpecifications())
                             .build())
                     .build();
-            ChatResponse response = chatModel.chat(request);
+
+            long planStart = System.currentTimeMillis();
+            ChatResponse response;
+            try {
+                // 用 CompletableFuture 给 LLM 调用加硬超时
+                response = CompletableFuture.supplyAsync(() -> chatModel.chat(request))
+                        .get(perCallTimeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException te) {
+                int planMs = (int)(System.currentTimeMillis() - planStart);
+                traceLogger.trace(traceCtx, "TOOL_PLAN", "iteration=" + (i + 1) + ", TIMEOUT after " + planMs + "ms");
+                break;
+            } catch (Exception e) {
+                int planMs = (int)(System.currentTimeMillis() - planStart);
+                traceLogger.trace(traceCtx, "TOOL_PLAN", "iteration=" + (i + 1) + ", ERROR after " + planMs + "ms: " + e.getMessage());
+                break;
+            }
+            int planMs = (int)(System.currentTimeMillis() - planStart);
+            traceLogger.trace(traceCtx, "TOOL_PLAN", "iteration=" + (i + 1) + ", duration=" + planMs + "ms");
+
             AiMessage aiMessage = response.aiMessage();
 
             if (!aiMessage.hasToolExecutionRequests()) {
@@ -327,6 +424,11 @@ public class ChatService {
             // 执行工具并追加结果
             messages.add(aiMessage);
             for (ToolExecutionRequest req : aiMessage.toolExecutionRequests()) {
+                if (System.currentTimeMillis() - totalStart > maxTotalMs) {
+                    traceLogger.trace(traceCtx, "TOOL_RESOLVE", "budget_exceeded during tool exec, stop");
+                    break;
+                }
+
                 long toolStart = System.currentTimeMillis();
                 String result = toolService.executeTool(req);
                 int toolDuration = (int)(System.currentTimeMillis() - toolStart);
@@ -337,10 +439,21 @@ public class ChatService {
         return messages;
     }
 
+    private static final java.util.Map<String, String> TOOL_LABEL_MAP = java.util.Map.of(
+            "getRecentReportsForTech", "查询近期报道",
+            "getReportsByDate", "按日期查询报道",
+            "searchReports", "搜索报道",
+            "getTechInfo", "查询技术信息",
+            "listTrackedTechnologies", "列出追踪技术",
+            "recordTechMention", "记录技术提及",
+            "knowledgeSearch", "搜索知识库"
+    );
+
     private void sendToolEvent(SseEmitter emitter, List<String> toolNames) {
         try {
+            // 发送中文标签名，避免前端显示 "getRecentReportsForTech, getRecentReportsForTech..."
             String toolNamesJson = toolNames.stream()
-                    .map(n -> "\"" + n + "\"")
+                    .map(n -> "\"" + TOOL_LABEL_MAP.getOrDefault(n, n) + "\"")
                     .collect(Collectors.joining(",", "[", "]"));
             emitter.send(SseEmitter.event()
                     .name("tool")
@@ -359,6 +472,27 @@ public class ChatService {
         java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
         long streamStartTime = System.currentTimeMillis();
 
+        // 心跳：有些代理/浏览器会缓冲小包，定期发送一个很小的 SSE 事件强制刷出。
+        // 该事件前端可忽略。
+        java.util.concurrent.ScheduledExecutorService heartbeatScheduler =
+                java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                    Thread t = new Thread(r, "sse-heartbeat-" + session.getId());
+                    t.setDaemon(true);
+                    return t;
+                });
+        java.util.concurrent.atomic.AtomicLong lastSendAt = new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+        heartbeatScheduler.scheduleAtFixedRate(() -> {
+            if (emitterCompleted.get()) return;
+            // 如果最近 2s 内已经有数据发送，就不额外发心跳
+            if (System.currentTimeMillis() - lastSendAt.get() < 2000) return;
+            try {
+                emitter.send(SseEmitter.event().name("ping").data(""));
+                lastSendAt.set(System.currentTimeMillis());
+            } catch (Exception e) {
+                emitterCompleted.set(true);
+            }
+        }, 1500, 1500, java.util.concurrent.TimeUnit.MILLISECONDS);
+
         streamingModel.chat(messages, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
@@ -375,6 +509,7 @@ public class ChatService {
                     emitter.send(SseEmitter.event()
                             .name("message")
                             .data("{\"t\":\"" + jsonSafe + "\"}"));
+                    lastSendAt.set(System.currentTimeMillis());
                 } catch (Exception e) {
                     log.warn("SSE send failed", e);
                     // 如果发送失败，标记为已完成避免后续重复调用
@@ -390,6 +525,10 @@ public class ChatService {
                 traceLogger.traceStreamingComplete(traceCtx, finalReply.length(), streamDuration);
                 traceLogger.endTrace(traceCtx);
 
+                heartbeatScheduler.shutdownNow();
+                activeStreams.remove(session.getId());
+                activeStreamContents.remove(session.getId());
+
                 // 自动生成标题 (首条消息)
                 if ("新对话".equals(session.getTitle())) {
                     String newTitle = generateSessionTitle(originalUserMessage, finalReply);
@@ -397,14 +536,18 @@ public class ChatService {
                     session.setTitle(newTitle);
                 }
 
-                // 异步提取关键词
-                extractAndRecordMentions(session.getTitle(), finalReply);
+                // 异步提取关键词（带 traceId）
+                String currentTitle = session.getTitle();
+                extractAndRecordMentions(traceCtx, currentTitle, originalUserMessage, finalReply);
                 // 异步摘要压缩
                 CompletableFuture.runAsync(() -> {
                     try {
-                        memoryService.compressMemoryIfNeeded(session.getId());
+                        traceLogger.trace(traceCtx, "MEMORY_COMPRESS", "start");
+                        memoryService.compressMemoryIfNeeded(session.getId(), traceCtx);
+                        traceLogger.trace(traceCtx, "MEMORY_COMPRESS", "done");
                     } catch (Exception e) {
                         log.warn("Memory compression failed for session {}", session.getId(), e);
+                        traceLogger.traceError(traceCtx, "MEMORY_COMPRESS", e);
                     }
                 });
 
@@ -415,6 +558,7 @@ public class ChatService {
                         emitter.send(SseEmitter.event()
                                 .name("done")
                                 .data("{\"sessionId\":" + session.getId() + ",\"sessionTitle\":\"" + titleJson + "\"}"));
+                        lastSendAt.set(System.currentTimeMillis());
                         emitter.complete();
                     } catch (Exception e) {
                         log.warn("SSE complete failed", e);
@@ -431,12 +575,17 @@ public class ChatService {
                     memoryService.saveMessage(session.getId(), "ASSISTANT", fullReply.toString());
                 }
 
+                heartbeatScheduler.shutdownNow();
+                activeStreams.remove(session.getId());
+                activeStreamContents.remove(session.getId());
+
                 // 只在第一次调用时完成 emitter
                 if (!emitterCompleted.getAndSet(true)) {
                     try {
                         emitter.send(SseEmitter.event()
                                 .name("error")
                                 .data("AI 服务异常"));
+                        lastSendAt.set(System.currentTimeMillis());
                         emitter.complete();
                     } catch (Exception e) {
                         log.warn("SSE error completion failed", e);
@@ -511,10 +660,17 @@ public class ChatService {
     }
 
     private void injectRagContext(List<dev.langchain4j.data.message.ChatMessage> messages, String ragContext) {
-        if (messages.isEmpty()) return;
+        if (messages.isEmpty() || ragContext == null || ragContext.isBlank()) return;
         SystemMessage original = (SystemMessage) messages.get(0);
-        messages.set(0, SystemMessage.from(
-                original.text() + "\n\n以下是从知识库检索到的相关参考资料：\n" + ragContext));
+        String injection = """
+
+                --- 知识库参考资料 ---
+                以下内容来自知识库的语义检索结果，可作为背景知识辅助回答。
+                请综合以下知识库内容和工具调用结果给出全面的回答，优先以工具的实时数据为准，
+                知识库内容作为补充背景，若两者冲突以工具结果为准：
+
+                """ + ragContext + "\n--- 知识库参考资料结束 ---";
+        messages.set(0, SystemMessage.from(original.text() + injection));
     }
 
     private boolean isFirstMessage(Long sessionId) {
@@ -537,20 +693,46 @@ public class ChatService {
      * 异步提取用户消息中提到的技术关键词，记录到热点话题
      * 双通道：1) 模式匹配已追踪技术名称 2) AI 工具自主记录（已在 TechTrackerTools 中实现）
      */
-    private void extractAndRecordMentions(String sessionTitle, String aiReply) {
+    private void extractAndRecordMentions(TraceLogger.TraceContext traceCtx,
+                                          String sessionTitle,
+                                          String userMessage,
+                                          String aiReply) {
         CompletableFuture.runAsync(() -> {
             try {
+                String context = (sessionTitle != null ? sessionTitle : "")
+                        + "\n" + (userMessage != null ? userMessage : "")
+                        + "\n" + (aiReply != null ? aiReply : "");
+
+                // 1) 仍保留：对已追踪技术的快速匹配（低成本、低误报）
                 List<String> techNames = trackerService.getAllTechNames();
-                String context = (sessionTitle != null ? sessionTitle : "") + " " + aiReply;
                 String contextLower = context.toLowerCase();
+                int hit = 0;
                 for (String name : techNames) {
-                    if (contextLower.contains(name.toLowerCase())) {
+                    if (name != null && !name.isBlank() && contextLower.contains(name.toLowerCase())) {
                         trackerService.recordMention(name);
-                        log.debug("Recorded mention for tracked tech: {}", name);
+                        hit++;
                     }
                 }
+
+                // 2) 新增：从文本中抽取候选技术名（简单规则版：优先 GitHub owner/repo，避免大模型误判）
+                // 说明：后续可以再引入 fastChatModel 做 NER，这里先把"可落库的确凿来源"打通。
+        MentionExtractor.MentionDiagnostics md = MentionExtractor.extractMentionsWithDiagnostics(context, 10);
+        List<String> extracted = md.mentions;
+                for (String kw : extracted) {
+                    trackerService.recordMention(kw);
+                }
+
+        String diag = (md.diagnostics == null || md.diagnostics.isEmpty())
+            ? "none"
+            : String.join(" | ", md.diagnostics);
+        if (diag.length() > 500) {
+            diag = diag.substring(0, 500) + "...";
+        }
+
+        traceLogger.trace(traceCtx, "MENTION_EXTRACT",
+            "trackedHits=" + hit + ", extracted=" + extracted.size() + ", diag=" + diag);
             } catch (Exception e) {
-                log.warn("Failed to extract tech mentions", e);
+                traceLogger.traceError(traceCtx, "MENTION_EXTRACT", e);
             }
         });
     }

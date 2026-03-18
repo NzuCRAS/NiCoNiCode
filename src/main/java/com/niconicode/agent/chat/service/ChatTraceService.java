@@ -1,14 +1,12 @@
 package com.niconicode.agent.chat.service;
 
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Service;
 
 /**
  * @deprecated 已弃用。全链路追踪已迁移到 TraceLogger，使用日志而非数据库记录。
- * 保留此类以维持向后兼容性。
+ * 此类不再注册为 Spring Bean（已移除 @Service），保留仅供历史参考，可在下次清理时删除。
  */
 @Slf4j
-@Service
 @Deprecated
 public class ChatTraceService {
 

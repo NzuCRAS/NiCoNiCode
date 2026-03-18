@@ -23,29 +23,80 @@ public class WriterAgent {
     private final TraceLogger traceLogger;
 
     /**
-     * 根据搜索结果撰写技术报道
+     * P2-N: 撰写结果，同时包含 AI 生成的标题和正文内容
      */
-    public String write(TrackedTech tech, SearchAgent.SearchResult searchResult,
-                        TraceLogger.TraceContext traceCtx) {
+    @lombok.Data
+    public static class WriteResult {
+        private final String title;
+        private final String content;
+    }
+
+    /**
+     * 根据搜索结果撰写技术报道，返回 AI 生成的标题和正文
+     */
+    public WriteResult write(TrackedTech tech, SearchAgent.SearchResult searchResult,
+                             TraceLogger.TraceContext traceCtx) {
         String prompt = buildPrompt(tech, searchResult);
         traceLogger.trace(traceCtx, "WRITER_PROMPT_BUILT", "contextLength=" + prompt.length());
 
         try {
             long aiStart = System.currentTimeMillis();
-            String content = chatModel.chat(prompt);
+            String rawContent = chatModel.chat(prompt);
             int aiDuration = (int)(System.currentTimeMillis() - aiStart);
-            traceLogger.trace(traceCtx, "WRITER_AI_CALL", "outputLength=" + content.length()
+            traceLogger.trace(traceCtx, "WRITER_AI_CALL", "outputLength=" + rawContent.length()
                     + ", duration=" + aiDuration + "ms");
 
-            String cleaned = cleanMarkdownContent(content);
+            String cleaned = cleanMarkdownContent(rawContent);
             traceLogger.trace(traceCtx, "WRITER_CONTENT_CLEAN",
-                    "before=" + content.length() + ", after=" + cleaned.length());
-            return cleaned;
+                    "before=" + rawContent.length() + ", after=" + cleaned.length());
+
+            // P2-N: 从 AI 正文中提取第一个 # 标题作为报道标题
+            String title = extractTitle(cleaned, tech, searchResult);
+            traceLogger.trace(traceCtx, "WRITER_TITLE", "title=" + title);
+
+            return new WriteResult(title, cleaned);
         } catch (Exception e) {
             log.error("WriterAgent failed for {}", tech.getName(), e);
             traceLogger.traceError(traceCtx, "WRITER_AI_CALL", e);
             throw new RuntimeException("报道撰写失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * P2-N: 从 AI 生成的 Markdown 正文中提取标题。
+     * 优先使用正文第一行的 # 一级标题；
+     * 其次用 ## 二级标题的第一行；
+     * 都没有则降级为机械拼接（保底）。
+     */
+    private String extractTitle(String content, TrackedTech tech, SearchAgent.SearchResult searchResult) {
+        if (content != null && !content.isBlank()) {
+            for (String line : content.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("# ") && trimmed.length() > 2) {
+                    return trimmed.substring(2).trim();
+                }
+            }
+            for (String line : content.split("\n")) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("## ") && trimmed.length() > 3) {
+                    return trimmed.substring(3).trim();
+                }
+            }
+        }
+        // 降级：机械拼接（保底，避免 NPE）
+        return tech.getName() + " " + searchResult.getDetectedVersion()
+                + " " + getModeLabel(searchResult.getUpdateMode());
+    }
+
+    private String getModeLabel(String mode) {
+        return switch (mode != null ? mode : "") {
+            case "RELEASE" -> "发布";
+            case "TAG" -> "发布 (Tag)";
+            case "COMMIT" -> "开发动态";
+            case "RSS" -> "更新公告";
+            case "OFFICIAL_URL" -> "版本更新";
+            default -> "更新";
+        };
     }
 
     private String buildPrompt(TrackedTech tech, SearchAgent.SearchResult searchResult) {
@@ -136,7 +187,10 @@ public class WriterAgent {
 
                 格式要求：
                 - Markdown 格式，直接输出内容，不要用 ```markdown ``` 包裹
-                - 标题使用 ## 二级标题
+                - **第一行必须是 `# 报道标题`（一级标题），标题要简洁有力、体现核心价值，不能是机械的"技术名+版本号"**
+                - 标题示例（好）："Spring Boot 3.4 正式发布：虚拟线程全面 GA，启动速度再提 40%"
+                - 标题反例（差）："Spring Boot 3.4.0 发布"
+                - 其余章节使用 ## 二级标题
                 - 重点内容使用**加粗**
                 - 变更列表使用有序或无序列表
                 - 代码或配置变更使用代码块

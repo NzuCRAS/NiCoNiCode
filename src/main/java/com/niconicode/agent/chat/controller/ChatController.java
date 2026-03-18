@@ -7,9 +7,12 @@ import com.niconicode.agent.chat.service.MemoryService;
 import com.niconicode.common.result.R;
 import com.niconicode.conversation.entity.ChatMessage;
 import com.niconicode.conversation.entity.ChatSession;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -32,9 +35,21 @@ public class ChatController {
     }
 
     @PostMapping(value = "/send/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter sendStream(@Valid @RequestBody ChatReq req, Authentication auth) {
+    public ResponseEntity<SseEmitter> sendStream(@Valid @RequestBody ChatReq req, Authentication auth,
+                                                  HttpServletResponse servletResponse) {
+        // 禁用 Tomcat 响应缓冲区，确保每次 SseEmitter.send() 的数据立即刷到客户端
+        // 默认 8KB 缓冲区会把小的 SSE 事件攒在一起，导致前端看不到流式输出
+        servletResponse.setBufferSize(0);
+
         Long userId = (Long) auth.getPrincipal();
-        return chatService.processMessageStream(userId, req);
+        SseEmitter emitter = chatService.processMessageStream(userId, req);
+
+        HttpHeaders headers = new HttpHeaders();
+        // 防止反向代理/网关缓冲 SSE，导致”只显示前几个字，最后一次性出现”
+        headers.add("X-Accel-Buffering", "no");
+        headers.add("Cache-Control", "no-cache, no-transform");
+        headers.add("Connection", "keep-alive");
+        return ResponseEntity.ok().headers(headers).body(emitter);
     }
 
     @GetMapping("/sessions")

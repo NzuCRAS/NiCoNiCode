@@ -38,6 +38,16 @@ public class LangChain4jConfig {
     @Value("${ai.fallback-model.timeout:${ai.model.timeout}}")
     private int fallbackTimeout;
 
+    // P3-R: 快速模型（意图识别、问题重写）——独立配置，使用轻量小模型
+    @Value("${ai.fast-model.base-url:${ai.model.base-url}}")
+    private String fastBaseUrl;
+    @Value("${ai.fast-model.api-key:${ai.model.api-key}}")
+    private String fastApiKey;
+    @Value("${ai.fast-model.model-name:${ai.model.model-name}}")
+    private String fastModelName;
+    @Value("${ai.fast-model.timeout:15}")
+    private int fastTimeout;
+
     // Circuit breaker
     @Value("${ai.circuit-breaker.failure-threshold:3}")
     private int failureThreshold;
@@ -58,12 +68,14 @@ public class LangChain4jConfig {
     }
 
     /**
-     * 快速模型：用于意图识别、问题重写等预处理任务
-     * 超时短 (15s)，不做熔断，不重试 (maxRetries=1)，超时直接失败让调用方 fallback
+     * P3-R fix: 快速模型，用于意图识别、问题重写等预处理任务。
+     * 使用独立的 ai.fast-model.* 配置，可指向比主模型更轻量的小模型
+     * （如 Qwen2.5-7B），响应更快、成本更低；超时短 (15s)，失败时调用方自行降级。
      */
     @Bean("fastChatModel")
     public ChatLanguageModel fastChatModel() {
-        return buildChatModel(baseUrl, apiKey, modelName, 15, 1);
+        log.info("FastChatModel using model: {}", fastModelName);
+        return buildChatModel(fastBaseUrl, fastApiKey, fastModelName, fastTimeout, 1);
     }
 
     @Bean

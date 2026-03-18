@@ -114,8 +114,10 @@ public class TechTrackerTools {
     }
 
     @Tool("记录用户提到的技术关键词，用于热点话题追踪。当用户在对话中讨论某个技术时调用此方法。")
-    public String recordTechMention(@P("技术名称关键词") String techName) {
-        log.info("Tool call: recordTechMention({})", techName);
+    public String recordTechMention(
+            @P("技术名称关键词") String techName,
+            @P("可选：traceId，用于全链路追踪（没有可留空）") String traceId) {
+        log.info("Tool call: recordTechMention({}, traceId={})", techName, traceId);
         try {
             trackerService.recordMention(techName);
             return "已记录技术提及: " + techName;

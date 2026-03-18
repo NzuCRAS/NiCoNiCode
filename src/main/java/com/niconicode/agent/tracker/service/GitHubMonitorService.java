@@ -211,30 +211,113 @@ public class GitHubMonitorService {
     }
 
     /**
-     * 获取近30日内新增的 Star 数量
+     * 获取近30日内新增的 Star 数量（估算）。
+     * <p>
+     * GitHub API 不直接提供历史 Star 快照，此处通过扫描最近的 WatchEvent
+     * 来估算增量。每页100条，最多扫描3页（300条事件，约覆盖活跃仓库一周）。
+     * 对于低活跃仓库事件数不足时，以 currentStars 的对数做保守估算。
+     *
+     * @param repo         仓库路径，如 "spring-projects/spring-boot"
+     * @param currentStars 当前 Star 总数（调用方应从 getRepoStats 中传入，避免重复请求）
      */
+    public int getStarDelta30Days(String repo, int currentStars) {
+        try {
+            java.time.Instant cutoff = java.time.Instant.now().minus(30, java.time.temporal.ChronoUnit.DAYS);
+            int watchEventCount = 0;
+            boolean reachedCutoff = false;
+
+            // 最多扫描3页事件（每页100条，共300条），防止 API 消耗过多
+            for (int page = 1; page <= 3 && !reachedCutoff; page++) {
+                String url = githubBaseUrl + "/repos/" + repo + "/events?per_page=100&page=" + page;
+                try {
+                    ResponseEntity<String> resp = restTemplate.exchange(
+                            url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
+                    JsonNode events = objectMapper.readTree(resp.getBody());
+                    if (!events.isArray() || events.isEmpty()) break;
+
+                    for (JsonNode event : events) {
+                        String type = event.has("type") ? event.get("type").asText() : "";
+                        String createdAt = event.has("created_at") ? event.get("created_at").asText() : "";
+                        if (!createdAt.isEmpty()) {
+                            java.time.Instant eventTime = java.time.Instant.parse(createdAt);
+                            if (eventTime.isBefore(cutoff)) {
+                                reachedCutoff = true;
+                                break;
+                            }
+                        }
+                        if ("WatchEvent".equals(type)) {
+                            watchEventCount++;
+                        }
+                    }
+                } catch (Exception e) {
+                    log.debug("Failed to fetch events page {} for {}", page, repo);
+                    break;
+                }
+            }
+
+            // 若扫描到的 WatchEvent 数量可信（非零），直接返回
+            if (watchEventCount > 0 || reachedCutoff) {
+                return watchEventCount;
+            }
+
+            // 降级：对数估算（低活跃仓库 events 接口可能为空或受限）
+            // 公式：sqrt(currentStars) * 0.5，即大项目估算增量更多，但上限500
+            return (int) Math.min(500, Math.sqrt(currentStars) * 0.5);
+
+        } catch (Exception e) {
+            log.warn("Failed to calculate star delta for {}: {}", repo, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * @deprecated 请使用 {@link #getStarDelta30Days(String, int)} 以避免重复请求 /repos/{repo}
+     */
+    @Deprecated
     public int getStarDelta30Days(String repo) {
         try {
-            // 获取当前 Star 数
             String url = githubBaseUrl + "/repos/" + repo;
             ResponseEntity<String> resp = restTemplate.exchange(
                     url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
             JsonNode body = objectMapper.readTree(resp.getBody());
             int currentStars = body.has("stargazers_count") ? body.get("stargazers_count").asInt() : 0;
-
-            // 尝试通过搜索 API 估算 30 日星数增长
-            // 由于 GitHub API 限制，这是一个简化估计
-            String since30DaysAgo = java.time.LocalDateTime.now().minusDays(30)
-                    .format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE) + "T00:00:00Z";
-            String searchUrl = githubBaseUrl + "/search/repositories?q=repo:" + repo + "+stars:>" + (currentStars - 500)
-                    + "+created:<" + since30DaysAgo;
-
-            ResponseEntity<String> searchResp = restTemplate.exchange(
-                    searchUrl, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
-            // 简化处理：直接返回估计值
-            return Math.min(currentStars, 500);
+            return getStarDelta30Days(repo, currentStars);
         } catch (Exception e) {
             log.warn("Failed to calculate star delta for {}: {}", repo, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 获取近 N 天内发布的 Release 数量（用于代码活力评分）。
+     * 请求 /releases?per_page=10 并统计 published_at 在时间窗口内的条目数。
+     *
+     * @param repo    仓库路径
+     * @param days    时间窗口（天）
+     */
+    public int getRecentReleasesCount(String repo, int days) {
+        String url = githubBaseUrl + "/repos/" + repo + "/releases?per_page=10";
+        try {
+            ResponseEntity<String> resp = restTemplate.exchange(
+                    url, HttpMethod.GET, new HttpEntity<>(createGetHeaders()), String.class);
+            JsonNode releases = objectMapper.readTree(resp.getBody());
+            if (!releases.isArray()) return 0;
+
+            java.time.Instant cutoff = java.time.Instant.now().minus(days, java.time.temporal.ChronoUnit.DAYS);
+            int count = 0;
+            for (JsonNode release : releases) {
+                String publishedAt = release.has("published_at") ? release.get("published_at").asText() : "";
+                if (!publishedAt.isEmpty()) {
+                    try {
+                        if (java.time.Instant.parse(publishedAt).isAfter(cutoff)) {
+                            count++;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+            return count;
+        } catch (Exception e) {
+            log.warn("Failed to get recent releases count for {}: {}", repo, e.getMessage());
             return 0;
         }
     }

@@ -30,7 +30,7 @@
           </div>
         </div>
         <div v-for="(msg, i) in chatStore.messages" :key="i"
-          v-show="!(msg.role === 'ASSISTANT' && msg.content === '' && chatStore.isCurrentSessionLoading)"
+          v-show="!(msg.role === 'ASSISTANT' && msg.content === '')"
           :class="['flex group', msg.role === 'USER' ? 'justify-end' : 'justify-start']">
           <div class="relative max-w-[75%]">
             <!-- 编辑模式 -->
@@ -80,16 +80,18 @@
         <!-- 流式加载中 / 停止生成（只在无流式内容时显示） -->
         <div v-if="chatStore.isCurrentSessionLoading && !isStreaming" class="flex justify-start">
           <div class="bg-white border border-gray-200 rounded-2xl rounded-bl-md px-4 py-3 text-sm text-gray-400 flex items-center space-x-2">
-            <span v-if="chatStore.toolsInUse.length">搜索中: {{ chatStore.toolsInUse.join(', ') }}...</span>
+            <span v-if="chatStore.toolsInUse.length">
+              🔍 {{ formatToolNames(chatStore.toolsInUse) }}
+            </span>
             <span v-else>思考中...</span>
-            <button @click="stopGeneration" class="text-xs text-red-400 hover:text-red-600 border border-red-300 px-2 py-0.5 rounded-full hover:bg-red-50">
+            <button @click="stopGeneration" class="text-xs text-red-400 hover:text-red-600 border border-red-300 px-2 py-0.5 rounded-full hover:bg-red-50 ml-2">
               停止生成
             </button>
           </div>
         </div>
-        <!-- 流式生成中的停止按钮（内容已在气泡中显示） -->
-        <div v-if="chatStore.isCurrentSessionLoading && isStreaming" class="flex justify-start">
-          <button @click="stopGeneration" class="text-xs text-red-400 hover:text-red-600 border border-red-300 px-2 py-1 rounded-full hover:bg-red-50">
+        <!-- 流式生成中的停止按钮（内容已在气泡中显示，仅显示按钮） -->
+        <div v-if="chatStore.isCurrentSessionLoading && isStreaming" class="flex justify-center mt-1">
+          <button @click="stopGeneration" class="text-xs text-red-400 hover:text-red-600 border border-red-300 px-3 py-1 rounded-full hover:bg-red-50">
             停止生成
           </button>
         </div>
@@ -248,5 +250,23 @@ function renderMarkdown(content: string): string {
   } catch {
     return content
   }
+}
+
+/** 将驼峰工具名转换为可读文字，并去重展示
+ *  例: ["getRecentReportsForTech", "searchReports"] → "查询近期报道、搜索报道"
+ */
+const TOOL_LABEL_MAP: Record<string, string> = {
+  getRecentReportsForTech: '查询近期报道',
+  getReportsByDate: '按日期查询报道',
+  searchReports: '搜索报道',
+  getTechInfo: '查询技术信息',
+  listTrackedTechnologies: '列出追踪技术',
+  recordTechMention: '记录技术提及',
+  knowledgeSearch: '搜索知识库',
+}
+
+function formatToolNames(tools: string[]): string {
+  const labels = tools.map(t => TOOL_LABEL_MAP[t] || t)
+  return labels.join('、') + '...'
 }
 </script>

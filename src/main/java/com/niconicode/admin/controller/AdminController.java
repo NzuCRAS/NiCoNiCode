@@ -217,7 +217,8 @@ public class AdminController {
 
     @PostMapping("/tracker/check-now")
     public R<Void> checkNow() {
-        new Thread(() -> trackingScheduler.checkAllTechs()).start();
+        // P1-M fix: 复用受控的 workExecutor 线程池，而非裸 new Thread
+        trackingScheduler.triggerManualCheck();
         return R.ok();
     }
 }

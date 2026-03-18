@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -33,6 +34,7 @@ public class RagService {
      * 通道2: 意图定向关键词搜索
      */
     public String retrieveContext(String query, String intent) {
+        long start = System.currentTimeMillis();
         // 通道1: 向量语义搜索
         CompletableFuture<List<Map<String, Object>>> vectorFuture =
                 CompletableFuture.supplyAsync(() -> {
@@ -41,6 +43,9 @@ public class RagService {
                     } catch (Exception e) {
                         log.warn("Vector search failed", e);
                         return Collections.emptyList();
+                    } finally {
+                        long d = System.currentTimeMillis();
+                        log.debug("[RAG] vectorSearch done, duration={}ms", (d - start));
                     }
                 });
 
@@ -52,20 +57,38 @@ public class RagService {
                     } catch (Exception e) {
                         log.warn("Keyword search failed", e);
                         return Collections.emptyList();
+                    } finally {
+                        long d = System.currentTimeMillis();
+                        log.debug("[RAG] keywordSearch done, duration={}ms", (d - start));
                     }
                 });
 
         // 合并 + 去重 + 重排序
-        List<Map<String, Object>> vectorResults = vectorFuture.join();
-        List<Map<String, Object>> keywordResults = keywordFuture.join();
+        List<Map<String, Object>> vectorResults;
+        List<Map<String, Object>> keywordResults;
+        try {
+            // 关键：避免 join() 在下游 HTTP/DB 卡住时无限阻塞
+            vectorResults = vectorFuture.get(3, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("[RAG] vectorSearch timeout/fail: {}", e.getMessage());
+            vectorResults = Collections.emptyList();
+        }
+        try {
+            keywordResults = keywordFuture.get(2, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("[RAG] keywordSearch timeout/fail: {}", e.getMessage());
+            keywordResults = Collections.emptyList();
+        }
 
         List<Map<String, Object>> merged = mergeAndDedup(vectorResults, keywordResults);
         List<Map<String, Object>> reranked = rerank(merged, query);
 
         if (reranked.isEmpty()) {
+            log.debug("[RAG] merged empty, totalDuration={}ms", (System.currentTimeMillis() - start));
             return "";
         }
 
+        log.debug("[RAG] merged size={}, totalDuration={}ms", reranked.size(), (System.currentTimeMillis() - start));
         return reranked.stream()
                 .limit(5)
                 .map(r -> "【" + r.getOrDefault("title", "知识库") + "】\n" + r.getOrDefault("text", ""))

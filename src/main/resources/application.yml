@@ -50,6 +50,13 @@ ai:
     api-key: sk-bmmrcwucxqiffmwebjqbztqllhjervqoifbrerrbaugzejpv
     model-name: deepseek-ai/DeepSeek-V2.5
     timeout: 120
+  # 快速模型：用于意图识别、问题重写等低延迟预处理任务
+  # 使用更小的模型（如 Qwen2.5-7B），响应快、成本低、15s 内可完成
+  fast-model:
+    base-url: https://api.siliconflow.cn/v1
+    api-key: sk-bmmrcwucxqiffmwebjqbztqllhjervqoifbrerrbaugzejpv
+    model-name: Qwen/Qwen2.5-7B-Instruct
+    timeout: 15
   circuit-breaker:
     failure-threshold: 3
     reset-timeout: 60

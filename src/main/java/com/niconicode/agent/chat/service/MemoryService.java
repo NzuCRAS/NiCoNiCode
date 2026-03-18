@@ -29,9 +29,18 @@ public class MemoryService {
     private final ChatMessageMapper messageMapper;
     private final SessionSummaryMapper summaryMapper;
     private final ChatLanguageModel chatModel;
+    private final TraceLogger traceLogger;
 
     private static final int WINDOW_SIZE = 20;
     private static final int SUMMARY_TRIGGER_THRESHOLD = 30;
+
+    public int getWindowSize() {
+        return WINDOW_SIZE;
+    }
+
+    public int getSummaryTriggerThreshold() {
+        return SUMMARY_TRIGGER_THRESHOLD;
+    }
 
     public ChatSession getOrCreateSession(Long userId, Long sessionId, String firstMessage) {
         if (sessionId != null) {
@@ -227,10 +236,23 @@ public class MemoryService {
      * 然后软删除已摘要的旧消息以节省上下文空间。
      */
     public void compressMemoryIfNeeded(Long sessionId) {
+        compressMemoryIfNeeded(sessionId, null);
+    }
+
+    /**
+     * 自动摘要压缩（支持 traceId 观测）
+     */
+    public void compressMemoryIfNeeded(Long sessionId, TraceLogger.TraceContext traceCtx) {
         long totalCount = messageMapper.selectCount(
                 new LambdaQueryWrapper<ChatMessage>()
                         .eq(ChatMessage::getSessionId, sessionId)
                         .isNull(ChatMessage::getDeletedAt));
+
+        if (traceCtx != null) {
+            traceLogger.trace(traceCtx, "MEMORY_COMPRESS_CHECK",
+                    "totalCount=" + totalCount + ", windowSize=" + WINDOW_SIZE
+                            + ", triggerThreshold=" + SUMMARY_TRIGGER_THRESHOLD);
+        }
 
         if (totalCount <= SUMMARY_TRIGGER_THRESHOLD) return;
 
@@ -254,10 +276,16 @@ public class MemoryService {
             dialogText = dialogText.substring(0, 4000);
         }
 
-        try {
+    try {
             // 获取现有摘要（增量合并）
             ChatSession session = sessionMapper.selectById(sessionId);
             String existingSummary = session.getSummary();
+
+        if (traceCtx != null) {
+        traceLogger.trace(traceCtx, "MEMORY_COMPRESS_CONTEXT",
+            "oldMessages=" + oldMessages.size() + ", hasExistingSummary="
+                + (existingSummary != null && !existingSummary.isBlank()));
+        }
 
             String prompt;
             if (existingSummary != null && !existingSummary.isBlank()) {
@@ -290,6 +318,11 @@ public class MemoryService {
             // 版本化保存摘要
             saveSummary(sessionId, summary, "AUTO_COMPRESS");
 
+            if (traceCtx != null) {
+                traceLogger.trace(traceCtx, "MEMORY_COMPRESS_SUMMARY",
+                        "summaryLength=" + (summary != null ? summary.length() : 0));
+            }
+
             // 软删除已摘要的旧消息
             List<Long> oldIds = oldMessages.stream().map(ChatMessage::getId).toList();
             messageMapper.update(null,
@@ -302,6 +335,10 @@ public class MemoryService {
                     sessionId, oldMessages.size(), WINDOW_SIZE);
         } catch (Exception e) {
             log.warn("Failed to compress memory for session {}", sessionId, e);
+
+            if (traceCtx != null) {
+                traceLogger.traceError(traceCtx, "MEMORY_COMPRESS", e);
+            }
         }
     }
 

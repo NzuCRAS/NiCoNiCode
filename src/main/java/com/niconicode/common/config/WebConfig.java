@@ -2,6 +2,7 @@ package com.niconicode.common.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
@@ -21,6 +22,10 @@ public class WebConfig implements WebMvcConfigurer {
 
     @Bean
     public RestTemplate restTemplate() {
-        return new RestTemplate();
+    SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+    // 外部依赖（Qdrant / Embedding / GitHub 等）必须有超时，防止线程长期阻塞导致“工具调用卡死”
+    factory.setConnectTimeout(2000);
+    factory.setReadTimeout(5000);
+    return new RestTemplate(factory);
     }
 }

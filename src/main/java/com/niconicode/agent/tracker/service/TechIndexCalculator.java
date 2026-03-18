@@ -29,9 +29,12 @@ public class TechIndexCalculator {
         }
 
         try {
-            // 获取仓库统计数据
+            // 1. 获取仓库基础统计（1次 API 调用）
             GitHubMonitorService.GitHubRepoStats repoStats = githubMonitor.getRepoStats(tech.getGithubRepo());
-            int starDelta30Days = githubMonitor.getStarDelta30Days(tech.getGithubRepo());
+
+            // 2. 传入已有的 starCount，避免 getStarDelta30Days 内部重复请求 /repos/{repo}
+            int starDelta30Days = githubMonitor.getStarDelta30Days(tech.getGithubRepo(), repoStats.getStarCount());
+
             int contributorCount = githubMonitor.getContributorCount(tech.getGithubRepo());
             GitHubMonitorService.IssueAndPRStats issuePRStats = githubMonitor.getIssueAndPRStats30Days(tech.getGithubRepo());
             long avgIssueResponseHours = githubMonitor.getAverageIssueResponseTime(tech.getGithubRepo());
@@ -147,13 +150,14 @@ public class TechIndexCalculator {
 
     private int calculateReleaseScore(String repo) {
         try {
-            String since90DaysAgo = java.time.LocalDateTime.now().minusDays(90)
-                    .format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE);
-            // 这里应该调用获取 Release 的方法，但当前的 API 可能没有参数化支持
-            // 简化处理：假设有较新的发布则给予高分
-            return 40; // 默认返回 patch 版本分数
+            // 查询近90天内的 Release 数量（最多扫描10条，足够覆盖90天窗口）
+            int recentReleases = githubMonitor.getRecentReleasesCount(repo, 90);
+            if (recentReleases >= 3) return 80;   // 近3个月3次以上发布：活跃维护
+            if (recentReleases == 2) return 60;   // 2次发布：正常维护
+            if (recentReleases == 1) return 40;   // 1次发布：偶尔维护（原硬编码值）
+            return 10;                             // 90天内无发布：长期未更新
         } catch (Exception e) {
-            return 0;
+            return 20; // 默认分数（不能确定，给一个保守中间值）
         }
     }
 }

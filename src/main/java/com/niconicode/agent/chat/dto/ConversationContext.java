@@ -79,20 +79,97 @@ public class ConversationContext {
         if (nickname != null && !nickname.isBlank()) {
             context.append("用户: ").append(nickname).append("\n");
         }
-        // 最近 6 条消息（3 轮对话），截断 200 字
-        int start = Math.max(0, recentMessages.size() - 6);
+        // 最近 12 条消息（6 轮对话），截断 400 字；并且识别“列表/枚举输出”，辅助“第几个/第二篇”指代消解
+        int start = Math.max(0, recentMessages.size() - 12);
         for (int i = start; i < recentMessages.size(); i++) {
             ChatMessage msg = recentMessages.get(i);
-            String content = msg.getContent();
-            context.append(msg.getRole()).append(": ")
-                    .append(content.length() > 200 ? content.substring(0, 200) : content)
+            String role = getRoleSafe(msg);
+            String content = getContentSafe(msg);
+
+            if ("ASSISTANT".equals(role) && looksLikeListOutput(content)) {
+                context.append("ASSISTANT(列表输出): ");
+            } else {
+                context.append(role).append(": ");
+            }
+
+            context.append(content.length() > 400 ? content.substring(0, 400) : content)
                     .append("\n");
         }
         // 上次意图实体
-        if (lastIntentResult != null && lastIntentResult.getEntities() != null
-                && !lastIntentResult.getEntities().isEmpty()) {
-            context.append("上次意图实体: ").append(lastIntentResult.getEntities()).append("\n");
+        List<String> entities = getEntitiesSafe(lastIntentResult);
+        if (entities != null && !entities.isEmpty()) {
+            context.append("上次意图实体: ").append(entities).append("\n");
         }
         return context.toString();
+    }
+
+    private static String getRoleSafe(ChatMessage msg) {
+        if (msg == null) return "";
+        try {
+            // 大多数情况下 ChatMessage 有 getter
+            return (String) ChatMessage.class.getMethod("getRole").invoke(msg);
+        } catch (Exception ignore) {
+            // 兼容字段可见（不同代码生成策略/老版本 class）
+            try {
+                java.lang.reflect.Field f = ChatMessage.class.getDeclaredField("role");
+                f.setAccessible(true);
+                Object v = f.get(msg);
+                return v != null ? v.toString() : "";
+            } catch (Exception e) {
+                return "";
+            }
+        }
+    }
+
+    private static String getContentSafe(ChatMessage msg) {
+        if (msg == null) return "";
+        try {
+            return (String) ChatMessage.class.getMethod("getContent").invoke(msg);
+        } catch (Exception ignore) {
+            try {
+                java.lang.reflect.Field f = ChatMessage.class.getDeclaredField("content");
+                f.setAccessible(true);
+                Object v = f.get(msg);
+                return v != null ? v.toString() : "";
+            } catch (Exception e) {
+                return "";
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> getEntitiesSafe(IntentClassifier.IntentResult intentResult) {
+        if (intentResult == null) return null;
+        try {
+            return (List<String>) IntentClassifier.IntentResult.class.getMethod("getEntities").invoke(intentResult);
+        } catch (Exception ignore) {
+            try {
+                java.lang.reflect.Field f = IntentClassifier.IntentResult.class.getDeclaredField("entities");
+                f.setAccessible(true);
+                Object v = f.get(intentResult);
+                return (List<String>) v;
+            } catch (Exception e) {
+                return null;
+            }
+        }
+    }
+
+    private static boolean looksLikeListOutput(String content) {
+        if (content == null) return false;
+        // 简单启发：包含多行、且出现 1./2./3. 或 - / • 等列表符号，或多次出现“【标题】”样式
+        String c = content.trim();
+        if (c.isEmpty()) return false;
+        int lines = c.split("\\r?\\n").length;
+        if (lines < 3) return false;
+        int hits = 0;
+        if (c.matches("(?s).*\\n\\s*[-•*]\\s+.*")) hits++;
+        if (c.matches("(?s).*\\n\\s*(?:[1-9]|10)[\\.|、)]\\s+.*")) hits++;
+        // 报道列表常见形态：多次出现【】
+        int bracket = 0;
+        for (int i = 0; i < c.length(); i++) {
+            if (c.charAt(i) == '【') bracket++;
+        }
+        if (bracket >= 2) hits++;
+        return hits >= 1;
     }
 }

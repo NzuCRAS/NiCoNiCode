@@ -7,6 +7,7 @@ import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
 import com.niconicode.agent.tracker.entity.HotTopic;
 import com.niconicode.agent.tracker.entity.TechReport;
 import com.niconicode.agent.tracker.entity.TrackedTech;
+import com.niconicode.agent.tracker.service.GitHubSearchService;
 import com.niconicode.agent.tracker.mapper.HotTopicMapper;
 import com.niconicode.agent.tracker.mapper.TechReportMapper;
 import com.niconicode.agent.tracker.mapper.TrackedTechMapper;
@@ -46,6 +47,7 @@ public class TrackerService {
     private final WriterAgent writerAgent;
     private final ReviewerAgent reviewerAgent;
     private final TraceLogger traceLogger;
+    private final GitHubSearchService gitHubSearchService;
 
     @Value("${ai.hot-topic.promotion-threshold:10}")
     private int promotionThreshold;
@@ -224,13 +226,20 @@ public class TrackerService {
         TrackedTech tech = techMapper.selectById(techId);
         if (tech == null || !"ACTIVE".equals(tech.getStatus())) return;
 
-        if (tech.getGithubRepo() == null || tech.getGithubRepo().isBlank()) return;
+        // P0-I fix: 不再要求必须有 githubRepo，SearchAgent 已支持 RSS/官方URL 作为数据源
+        boolean hasAnySource = (tech.getGithubRepo() != null && !tech.getGithubRepo().isBlank())
+                || (tech.getRssUrl() != null && !tech.getRssUrl().isBlank())
+                || (tech.getOfficialUrl() != null && !tech.getOfficialUrl().isBlank());
+        if (!hasAnySource) return;
 
         // 初始化追踪上下文
         TraceLogger.TraceContext traceCtx = traceLogger.startTrace(-1L, techId);
 
         try {
-            traceLogger.trace(traceCtx, "TRACKER_START", "tech=" + tech.getName() + ", repo=" + tech.getGithubRepo());
+            traceLogger.trace(traceCtx, "TRACKER_START", "tech=" + tech.getName()
+                    + ", repo=" + tech.getGithubRepo()
+                    + ", rss=" + (tech.getRssUrl() != null ? "yes" : "no")
+                    + ", official=" + (tech.getOfficialUrl() != null ? "yes" : "no"));
 
             // Stage 1: SearchAgent — 多渠道信息搜集
             long searchStart = System.currentTimeMillis();
@@ -249,24 +258,25 @@ public class TrackerService {
                     + " (" + searchResult.getUpdateMode() + "), sources=" + searchResult.getSourceUrls().size()
                     + ", duration=" + searchDuration + "ms");
 
-            // Stage 2: WriterAgent — 撰写高质量报道
+            // Stage 2: WriterAgent — 撰写高质量报道（P2-N: 返回 WriteResult，含 AI 生成标题）
             long writerStart = System.currentTimeMillis();
-            String reportContent = writerAgent.write(tech, searchResult, traceCtx);
+            WriterAgent.WriteResult writeResult = writerAgent.write(tech, searchResult, traceCtx);
             int writerDuration = (int)(System.currentTimeMillis() - writerStart);
-            traceLogger.trace(traceCtx, "WRITER_AGENT", "Report generated, length=" + reportContent.length()
+            traceLogger.trace(traceCtx, "WRITER_AGENT", "Report generated, length=" + writeResult.getContent().length()
+                    + ", title=" + writeResult.getTitle()
                     + ", duration=" + writerDuration + "ms");
 
             // Stage 3: ReviewerAgent — 审核 + 评分 + 发布决策
             long reviewStart = System.currentTimeMillis();
-            ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, reportContent, searchResult, traceCtx);
+            ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, writeResult.getContent(), searchResult, traceCtx);
             int reviewDuration = (int)(System.currentTimeMillis() - reviewStart);
 
             if (review.isApproved()) {
                 // 构建并发布报道
                 TechReport report = new TechReport();
                 report.setTrackedTechId(tech.getId());
-                report.setTitle(tech.getName() + " " + searchResult.getDetectedVersion() + " "
-                        + getModeLabel(searchResult.getUpdateMode()));
+                // P2-N: 使用 WriterAgent 生成的 AI 标题，而非机械拼接
+                report.setTitle(writeResult.getTitle());
                 report.setContent(review.getRevisedContent());
                 report.setNewVersion(searchResult.getDetectedVersion());
                 report.setChangeSummary(
@@ -329,7 +339,8 @@ public class TrackerService {
             docReq.setSourceType("TRACKER_REPORT");
             docReq.setSourceId(report.getId());
             docReq.setTags(tech.getName() + "," + tech.getCategory());
-            knowledgeService.createDoc(docReq);
+            // P2-O: 使用幂等方法，防止重复同步时产生重复文档
+            knowledgeService.createOrUpdateDoc(docReq);
             traceLogger.trace(traceCtx, "KNOWLEDGE_SYNC", "synced reportId=" + report.getId());
         } catch (Exception e) {
             log.warn("Failed to sync report to knowledge base: {}", e.getMessage());
@@ -361,26 +372,22 @@ public class TrackerService {
      * @deprecated 已被 ReviewerAgent.scoreTechIndex() 替代，保留用于手动创建报道
      */
     private int generateTechIndex(String techName, String category, String content) {
-        String prompt = """
-                根据以下技术名称、分类和报道内容，生成一个 0-1000 的技术指数，用于评估这次更新的质量和影响因子。
-
-                评分标准：
-                - 0-100：无人在意的小型开源项目的一次 README 或小补丁更新
-                - 100-300：小型或不知名项目的常规更新
-                - 300-500：知名开源框架或工具的常规更新
-                - 500-700：重要技术框架（如 Spring、React、Vue 等）的中等更新
-                - 700-900：影响广泛的重要技术（如 Node.js、Docker 等）的重要更新
-                - 900-1000：最前沿的大模型（如 Claude、GPT 等）或操作系统级别的重要版本迭代
-
-                技术名称: %s
-                分类: %s
-                报道内容摘要（前500字）:
-                %s
-
-                请直接返回一个数字 (0-1000)，不要其他说明文字。
-                """.formatted(
-                techName, category,
-                content.length() > 500 ? content.substring(0, 500) : content);
+    // 注意：不要使用 String.format / """.formatted
+    // 当 content 内部包含 '%'（例如 Markdown 里常见的 100%）时，Formatter 会抛 UnknownFormatConversionException。
+    String contentSummary = content.length() > 500 ? content.substring(0, 500) : content;
+    String prompt = "根据以下技术名称、分类和报道内容，生成一个 0-1000 的技术指数，用于评估这次更新的质量和影响因子。\n\n"
+        + "评分标准：\n"
+        + "- 0-100：无人在意的小型开源项目的一次 README 或小补丁更新\n"
+        + "- 100-300：小型或不知名项目的常规更新\n"
+        + "- 300-500：知名开源框架或工具的常规更新\n"
+        + "- 500-700：重要技术框架（如 Spring、React、Vue 等）的中等更新\n"
+        + "- 700-900：影响广泛的重要技术（如 Node.js、Docker 等）的重要更新\n"
+        + "- 900-1000：最前沿的大模型（如 Claude、GPT 等）或操作系统级别的重要版本迭代\n\n"
+        + "技术名称: " + techName + "\n"
+        + "分类: " + category + "\n"
+        + "报道内容摘要（前500字）:\n"
+        + contentSummary + "\n\n"
+        + "请直接返回一个数字 (0-1000)，不要其他说明文字。\n";
 
         try {
             String response = chatModel.chat(prompt).trim();
@@ -516,6 +523,34 @@ public class TrackerService {
         newTech.setStatus("ACTIVE");
         newTech.setMentionCount(topic.getMentionCount());
         newTech.setIsHot(true);
+
+        // 自动补全：尝试根据技术名在 GitHub 上检索最相关且 star 最高的仓库
+        // 注意：这是“尽力而为”的自动填充，后续可在管理后台人工校正。
+        try {
+            GitHubSearchService.RepoCandidate best = gitHubSearchService.findBestRepoByName(topic.getKeyword());
+            if (best != null && best.getFullName() != null && !best.getFullName().isBlank()) {
+                newTech.setGithubRepo(best.getFullName());
+                // SearchAgent 已升级为聚合检查，因此默认模式用 RELEASE 即可
+                newTech.setTrackingMode("RELEASE");
+
+                TraceLogger.TraceContext traceCtx = null;
+                try {
+                    traceCtx = traceLogger.startTrace(null, null);
+                    traceLogger.trace(traceCtx, "PROMOTE_GITHUB_AUTOFILL",
+                            "keyword=" + topic.getKeyword() + " repo=" + best.getFullName()
+                                    + " stars=" + best.getStars());
+                } finally {
+                    if (traceCtx != null) {
+                        traceLogger.endTrace(traceCtx);
+                    }
+                }
+
+                log.info("Auto-filled github repo for promoted tech '{}': {} (stars={})",
+                        topic.getKeyword(), best.getFullName(), best.getStars());
+            }
+        } catch (Exception e) {
+            log.debug("Failed to auto-fill github repo for promoted tech {}: {}", topic.getKeyword(), e.getMessage());
+        }
         techMapper.insert(newTech);
 
         topic.setPromotedToTracked(true);

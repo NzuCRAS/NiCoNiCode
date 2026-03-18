@@ -23,9 +23,16 @@ export const useChatStore = defineStore('chat', () => {
   const abortController = ref<AbortController | null>(null)
   const toolsInUse = ref<string[]>([])
   const streamingStarted = ref(false)
+  // 用于显式触发 UI 重绘（保险丝）：流式场景中 token 可能极碎，深层对象变更有时不会立刻驱动组件更新
+  const renderTick = ref(0)
   const messages = computed(() => {
+    // 访问一次 renderTick，让其成为 computed 依赖，确保每帧 flush 都会触发依赖更新
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    renderTick.value
     if (currentSessionId.value === null) return []
-    return sessionMessagesCache.value.get(currentSessionId.value) || []
+  // 关键：返回一个新数组引用，避免 UI 只在数组引用变化时才重渲染
+  const arr = sessionMessagesCache.value.get(currentSessionId.value) || []
+  return arr.slice()
   })
 
   const isCurrentSessionLoading = computed(() => loadingSessionId.value === currentSessionId.value && loadingSessionId.value !== null)
@@ -50,16 +57,42 @@ export const useChatStore = defineStore('chat', () => {
     return data
   }
 
-  /** 共享 SSE 流读取逻辑 */
+  /** 共享 SSE 流读取逻辑
+   *  @param sessionMsgs  当前 session 的消息数组引用，用于延迟 push assistantMsg
+   *  @param assistantMsg 预创建的 AI 气泡对象（未 push 进数组，等首个 token 再 push）
+   */
   async function readSSEStream(
     response: Response,
     assistantMsg: Message,
-    sessionId: number
+    sessionId: number,
+    sessionMsgs: Message[]
   ) {
     const reader = response.body!.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
     let currentEvent = ''
+  let currentData = ''
+    // 工具名累积集合（跨轮去重）
+    const toolsSeen = new Set<string>()
+
+    // token 合并缓冲：避免每个极小 chunk 都触发一次响应式更新导致浏览器合并渲染、最后一次性显示
+    let pendingText = ''
+    let flushScheduled = false
+    const scheduleFlush = () => {
+      if (flushScheduled) return
+      flushScheduled = true
+      requestAnimationFrame(() => {
+        flushScheduled = false
+        if (!pendingText) return
+        if (!streamingStarted.value) {
+          streamingStarted.value = true
+          sessionMsgs.push(assistantMsg)
+        }
+        assistantMsg.content += pendingText
+        pendingText = ''
+        renderTick.value++
+      })
+    }
 
     while (true) {
       const { done, value } = await reader.read()
@@ -69,23 +102,29 @@ export const useChatStore = defineStore('chat', () => {
       buffer = lines.pop() || ''
 
       for (const line of lines) {
-        if (line.startsWith('event:')) {
-          currentEvent = line.substring(6).trim()
-        } else if (line.startsWith('data:')) {
-          const data = line.substring(5).trim()
+        // 空行表示一个 SSE 事件结束
+        if (line.trim() === '') {
+          if (!currentEvent) {
+            currentData = ''
+            continue
+          }
+
+          const data = currentData
           if (currentEvent === 'tool') {
             try {
               const toolData = JSON.parse(data)
-              toolsInUse.value = toolData.tools || []
+              const newTools: string[] = toolData.tools || []
+              newTools.forEach(t => toolsSeen.add(t))
+              toolsInUse.value = Array.from(toolsSeen)
             } catch { /* ignore */ }
-          } else if (currentEvent === 'done' || data.includes('"sessionId"')) {
+          } else if (currentEvent === 'done') {
             toolsInUse.value = []
+            toolsSeen.clear()
             try {
               const json = JSON.parse(data)
               if (currentSessionId.value === sessionId) {
                 currentSessionId.value = json.sessionId
               }
-              // 更新侧栏标题
               if (json.sessionTitle) {
                 const s = sessions.value.find(s => s.id === json.sessionId)
                 if (s) {
@@ -95,16 +134,42 @@ export const useChatStore = defineStore('chat', () => {
                 }
               }
             } catch { /* ignore */ }
+            } else if (currentEvent === 'ping') {
+              // 服务器心跳，用于强制代理/浏览器刷新缓冲；前端无需处理
           } else if (currentEvent === 'error') {
             toolsInUse.value = []
+            toolsSeen.clear()
           } else if (currentEvent === 'message') {
             toolsInUse.value = []
-            if (!streamingStarted.value) streamingStarted.value = true
-            assistantMsg.content += extractMessageText(data)
+            toolsSeen.clear()
+            pendingText += extractMessageText(data)
+            scheduleFlush()
           }
+
           currentEvent = ''
+          currentData = ''
+          continue
+        }
+
+        if (line.startsWith('event:')) {
+          currentEvent = line.substring(6).trim()
+        } else if (line.startsWith('data:')) {
+          const chunk = line.substring(5)
+          // 同一事件可能多行 data，按 SSE 规范用 '\n' 连接
+          currentData += (currentData ? '\n' : '') + chunk
         }
       }
+    }
+
+    // 读取结束时，确保把最后一段 pendingText 刷出
+    if (pendingText) {
+      if (!streamingStarted.value) {
+        streamingStarted.value = true
+        sessionMsgs.push(assistantMsg)
+      }
+      assistantMsg.content += pendingText
+      pendingText = ''
+      renderTick.value++
     }
   }
 
@@ -189,9 +254,10 @@ export const useChatStore = defineStore('chat', () => {
 
     const sessionMsgs = getOrCreateSessionMessages(sessionId)
     const userMsg: Message = { id: 0, role: 'USER', content: message, createdAt: new Date().toISOString() }
+    // assistantMsg 不提前 push，等收到第一个 token 再由 readSSEStream 内部 push
+    // 这样可以避免"思考中"气泡和空 AI 气泡同时显示
     const assistantMsg: Message = { id: 0, role: 'ASSISTANT', content: '', createdAt: new Date().toISOString() }
     sessionMsgs.push(userMsg)
-    sessionMsgs.push(assistantMsg)
 
     const controller = new AbortController()
     abortController.value = controller
@@ -200,7 +266,7 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       const response = await createSSEFetch(sessionId, message, controller)
-      await readSSEStream(response, assistantMsg, sessionId)
+      await readSSEStream(response, assistantMsg, sessionId, sessionMsgs)
     } catch (err: any) {
       if (err.name !== 'AbortError') throw err
     } finally {
@@ -242,7 +308,7 @@ export const useChatStore = defineStore('chat', () => {
 
     loadingSessionId.value = sessionId
     const assistantMsg: Message = { id: 0, role: 'ASSISTANT', content: '', createdAt: new Date().toISOString() }
-    msgs.push(assistantMsg)
+    // 不提前 push，readSSEStream 收到首个 token 时才 push
 
     const controller = new AbortController()
     abortController.value = controller
@@ -251,7 +317,7 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       const response = await createSSEFetch(sessionId, newContent, controller)
-      await readSSEStream(response, assistantMsg, sessionId)
+      await readSSEStream(response, assistantMsg, sessionId, msgs)
     } catch (err: any) {
       if (err.name !== 'AbortError') throw err
     } finally {
@@ -286,7 +352,7 @@ export const useChatStore = defineStore('chat', () => {
 
     loadingSessionId.value = sessionId
     const assistantMsg: Message = { id: 0, role: 'ASSISTANT', content: '', createdAt: new Date().toISOString() }
-    msgs.push(assistantMsg)
+    // 不提前 push，readSSEStream 收到首个 token 时才 push
 
     const controller = new AbortController()
     abortController.value = controller
@@ -295,7 +361,7 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       const response = await createSSEFetch(sessionId, lastUserMsg, controller)
-      await readSSEStream(response, assistantMsg, sessionId)
+      await readSSEStream(response, assistantMsg, sessionId, msgs)
     } catch (err: any) {
       if (err.name !== 'AbortError') throw err
     } finally {
@@ -330,7 +396,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   return {
-    sessions, currentSessionId, messages, loadingSessionId, isCurrentSessionLoading,
+  sessions, currentSessionId, messages, renderTick, loadingSessionId, isCurrentSessionLoading,
     abortController, toolsInUse, streamingStarted,
     loadSessions, createSession, loadMessages, sendMessage, sendMessageStream,
     deleteSession, deleteMessage, deleteMessagesAfter, editAndResend,
