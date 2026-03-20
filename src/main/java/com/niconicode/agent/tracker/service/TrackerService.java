@@ -429,15 +429,17 @@ public class TrackerService {
         // 注：这里需要检查 knowledge_doc 表中是否已有相同的 sourceId 和 sourceType
 
         // 生成 tags 和自动推荐分类
-        String tagsPrompt = """
-                根据以下技术报道的标题和内容，生成 3-5 个逗号分隔的标签（中文或英文），要求：
-                1. 标签应该体现核心技术和更新内容
-                2. 避免过于通用的标签
-                3. 直接返回标签列表，不要其他说明文字
+    String title = report.getTitle();
+    String contentSummary = report.getContent().substring(0, Math.min(500, report.getContent().length()));
+    // 注意：report content 可能包含 '%'，不要用 formatted
+    String tagsPrompt = """
+        根据以下技术报道的标题和内容，生成 3-5 个逗号分隔的标签（中文或英文），要求：
+        1. 标签应该体现核心技术和更新内容
+        2. 避免过于通用的标签
+        3. 直接返回标签列表，不要其他说明文字
 
-                标题: %s
-                内容摘要: %s
-                """.formatted(report.getTitle(), report.getContent().substring(0, Math.min(500, report.getContent().length())));
+        标题: """ + title + "\r\n"
+        + "内容摘要: \r\n" + contentSummary + "\r\n";
 
         String tagsResponse = chatModel.chat(tagsPrompt).trim();
         String tags = tagsResponse.replaceAll("[\\n\\r]+", ",").replaceAll(",+", ",").replaceAll("^,|,$", "");

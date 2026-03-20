@@ -3,6 +3,10 @@ package com.niconicode.agent.chat.service;
 import com.niconicode.agent.chat.dto.ChatReq;
 import com.niconicode.agent.chat.dto.ChatResp;
 import com.niconicode.agent.chat.dto.ConversationContext;
+import com.niconicode.agent.chat.dto.IntentClassification;
+import com.niconicode.agent.chat.dto.SubTask;
+import com.niconicode.agent.chat.graph.MemoryPipelineGraph;
+import com.niconicode.agent.chat.graph.MemoryState;
 import com.niconicode.conversation.entity.ChatMessage;
 import com.niconicode.conversation.entity.ChatSession;
 import com.niconicode.agent.tracker.service.TrackerService;
@@ -45,6 +49,8 @@ public class ChatService {
     private final QueryRewriter queryRewriter;
     private final TraceLogger traceLogger;
     private final ConversationContextBuilder contextBuilder;
+    private final SubTaskDagExecutor dagExecutor;
+    private final MemoryPipelineGraph memoryPipelineGraph;
 
     @Value("${ai.tools.enabled:true}")
     private boolean toolsEnabled;
@@ -81,7 +87,7 @@ public class ChatService {
 
         ConversationContext ctx = contextBuilder.build(userId, session);
         List<dev.langchain4j.data.message.ChatMessage> messages =
-                ctx.toLangChainMessages(SYSTEM_PROMPT.formatted(java.time.LocalDate.now().toString()), req.getMessage());
+                ctx.toLangChainMessages(SYSTEM_PROMPT.replace("%s", java.time.LocalDate.now().toString()), req.getMessage());
 
         String reply;
         try {
@@ -105,6 +111,7 @@ public class ChatService {
         memoryService.saveMessage(session.getId(), "ASSISTANT", reply);
 
         // 异步摘要压缩（非流式也执行，保持行为一致）
+        final String finalReplyForMemory = reply;
         CompletableFuture.runAsync(() -> {
             try {
                 traceLogger.trace(traceCtx, "MEMORY_COMPRESS", "start");
@@ -114,6 +121,24 @@ public class ChatService {
                 traceLogger.traceError(traceCtx, "MEMORY_COMPRESS", e);
             }
         });
+
+        // 异步记忆提取（双层记忆）
+        if (req.getMessage().length() > 5) {
+            CompletableFuture.runAsync(() -> {
+                try {
+                    MemoryState memState = MemoryState.builder()
+                            .userId(userId).sessionId(session.getId())
+                            .currentUserMessage(req.getMessage())
+                            .currentAiReply(finalReplyForMemory)
+                            .recentMessages(ctx.getRecentMessages())
+                            .traceCtx(traceCtx)
+                            .build();
+                    memoryPipelineGraph.executeMemoryExtraction(memState);
+                } catch (Exception e) {
+                    traceLogger.traceError(traceCtx, "MEMORY_PIPELINE", e);
+                }
+            });
+        }
 
         String sessionTitle = session.getTitle();
         if (isFirstMessage && "新对话".equals(sessionTitle)) {
@@ -138,7 +163,7 @@ public class ChatService {
 
         ConversationContext ctx = contextBuilder.build(userId, session);
         List<dev.langchain4j.data.message.ChatMessage> messages =
-                ctx.toLangChainMessages(SYSTEM_PROMPT.formatted(java.time.LocalDate.now().toString()), req.getMessage());
+                ctx.toLangChainMessages(SYSTEM_PROMPT.replace("%s", java.time.LocalDate.now().toString()), req.getMessage());
 
         traceLogger.traceUserMessage(traceCtx, req.getMessage());
 
@@ -174,25 +199,29 @@ public class ChatService {
                         return;
                     }
 
-                    // 2. 上下文感知 AI 意图识别 (所有非噪音消息)
-                    long intentStart = System.currentTimeMillis();
+                    // 2. 三级级联意图识别
                     String intentContext = ctx.toIntentContextString();
-                    IntentClassifier.IntentResult intentResult;
+                    IntentClassification intentResult;
                     try {
                         intentResult = intentClassifier.classify(req.getMessage(), intentContext);
                     } catch (Exception e) {
                         log.warn("Intent classification failed, defaulting to GENERAL_CHAT: {}", e.getMessage());
-                        intentResult = new IntentClassifier.IntentResult();
+                        intentResult = IntentClassification.fallback();
                     }
-                    int intentDuration = (int)(System.currentTimeMillis() - intentStart);
-                    traceLogger.traceIntentClassification(traceCtx, intentResult.getIntent().name(), intentDuration);
+                    traceLogger.traceIntentClassification(traceCtx,
+                            intentResult.getPrimaryIntent().name(),
+                            intentResult.getSubIntent().name(),
+                            intentResult.getClassifiedBy().name(),
+                            (int) intentResult.getLatencyMs());
 
                     // 回写意图结果到上下文
-                    ctx.setLastIntentResult(intentResult);
+                    ctx.setLastIntentClassification(intentResult);
 
                     // 保存用户消息（附带意图元数据）
-                    String userMeta = "{\"intent\":\"" + intentResult.getIntent()
-                            + "\",\"confidence\":" + intentResult.getConfidence() + "}";
+                    String userMeta = "{\"intent\":\"" + intentResult.getPrimaryIntent()
+                            + "\",\"subIntent\":\"" + intentResult.getSubIntent()
+                            + "\",\"confidence\":" + intentResult.getConfidence()
+                            + ",\"classifiedBy\":\"" + intentResult.getClassifiedBy() + "\"}";
                     memoryService.saveMessage(session.getId(), "USER", req.getMessage(), userMeta);
 
                     // 检查 emitter 是否还活着
@@ -203,7 +232,7 @@ public class ChatService {
                     }
 
                     // 3. UNCLEAR + 低置信度 → 主动澄清
-                    if (intentResult.getIntent() == IntentClassifier.Intent.UNCLEAR
+                    if (intentResult.getPrimaryIntent() == IntentClassification.Intent.UNCLEAR
                             && intentResult.getClarification() != null) {
                         sendClarificationResponse(emitter, session, intentResult.getClarification(), fullReply, traceCtx);
                         return;
@@ -213,14 +242,16 @@ public class ChatService {
                     injectIntentContext(messages, intentResult);
 
                     // 5. 按意图路由
-                    if (IntentClassifier.needsToolResolution(intentResult.getIntent())) {
-                        // 复杂意图: 重写 → [工具调用 + RAG 并行] → 流式
+                    if (intentResult.needsToolResolution()) {
+                        // 复杂意图: 重写(感知 IntentClassification) → [DAG 多路 RAG + 工具调用 并行] → 流式
                         long rewriteStart = System.currentTimeMillis();
                         QueryRewriter.RewriteResult rewrite = null;
                         try {
-                            rewrite = queryRewriter.rewrite(req.getMessage(), intentContext);
+                            rewrite = queryRewriter.rewrite(req.getMessage(), intentContext, intentResult);
                             int rewriteDuration = (int)(System.currentTimeMillis() - rewriteStart);
-                            traceLogger.traceQueryRewrite(traceCtx, req.getMessage(), rewrite.getRewritten(), rewriteDuration);
+                            traceLogger.traceQueryRewriteEnhanced(traceCtx, req.getMessage(),
+                                    rewrite.getRewritten(), rewrite.getStrategy().name(),
+                                    rewrite.getSubTasks().size(), rewriteDuration);
                             if (!rewrite.getRewritten().equals(req.getMessage())) {
                                 messages.set(messages.size() - 1,
                                         UserMessage.from(rewrite.getRewritten()));
@@ -236,30 +267,21 @@ public class ChatService {
                             return;
                         }
 
-                        // RAG 与工具调用并行：RAG 检索在后台线程执行，工具调用在当前线程执行
-                        final String ragQuery = rewrite != null ? rewrite.getRewritten() : req.getMessage();
-                        final String intentName = intentResult.getIntent().name();
-                        CompletableFuture<String> ragFuture = CompletableFuture.supplyAsync(() -> {
-                            try {
-                                long ragStart = System.currentTimeMillis();
-                                String ragCtx = ragService.retrieveContext(ragQuery, intentName);
-                                int ragDuration = (int)(System.currentTimeMillis() - ragStart);
-                                if (ragCtx != null && !ragCtx.isBlank()) {
-                                    traceLogger.trace(traceCtx, "RAG_RETRIEVE",
-                                            "intent=" + intentName + ", chars=" + ragCtx.length() + ", duration=" + ragDuration + "ms");
-                                } else {
-                                    traceLogger.trace(traceCtx, "RAG_RETRIEVE", "no results, duration=" + ragDuration + "ms");
-                                }
-                                return ragCtx;
-                            } catch (Exception e) {
-                                log.warn("RAG retrieval failed: {}", e.getMessage());
-                                traceLogger.trace(traceCtx, "RAG_RETRIEVE", "failed: " + e.getMessage());
-                                return "";
-                            }
-                        });
+                        // DAG 多路 RAG 与工具调用并行
+                        final List<SubTask> subTasks = rewrite != null ? rewrite.getSubTasks() : null;
+                        CompletableFuture<SubTaskDagExecutor.DagExecutionResult> dagFuture =
+                                CompletableFuture.supplyAsync(() -> {
+                                    try {
+                                        return dagExecutor.execute(subTasks, traceCtx);
+                                    } catch (Exception e) {
+                                        log.warn("DAG execution failed: {}", e.getMessage());
+                                        traceLogger.trace(traceCtx, "DAG_EXEC", "failed: " + e.getMessage());
+                                        return null;
+                                    }
+                                });
 
             traceLogger.trace(traceCtx, "PIPELINE", "before_tool_resolution");
-                        // 工具调用在当前线程同步执行
+                        // 工具调用在当前线程同步执行（用主 rewritten 查询保持 message context 完整）
             long toolResolveStart = System.currentTimeMillis();
             List<dev.langchain4j.data.message.ChatMessage> resolvedMessages =
                 resolveToolCalls(new ArrayList<>(messages), emitter, traceCtx);
@@ -272,22 +294,25 @@ public class ChatService {
                             return;
                         }
 
-                        // 等待 RAG 结果（工具调用通常比 RAG 慢，此处通常已完成）
-                        long ragWaitStart = System.currentTimeMillis();
-                        String ragContext = ragFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
-                        int ragWaitDuration = (int)(System.currentTimeMillis() - ragWaitStart);
-                        traceLogger.trace(traceCtx, "RAG_WAIT", "duration=" + ragWaitDuration + "ms");
-                        if (ragContext != null && !ragContext.isBlank()) {
-                            injectRagContext(resolvedMessages, ragContext);
+                        // 等待 DAG RAG 结果
+                        long dagWaitStart = System.currentTimeMillis();
+                        SubTaskDagExecutor.DagExecutionResult dagResult =
+                                dagFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                        int dagWaitDuration = (int)(System.currentTimeMillis() - dagWaitStart);
+                        traceLogger.trace(traceCtx, "DAG_WAIT", "duration=" + dagWaitDuration + "ms");
+
+                        if (dagResult != null && dagResult.getMergedRagContext() != null
+                                && !dagResult.getMergedRagContext().isBlank()) {
+                            injectRagContext(resolvedMessages, dagResult.getMergedRagContext());
                         }
 
                         traceLogger.traceStreamingStart(traceCtx);
-                        startStreaming(resolvedMessages, emitter, session, fullReply, traceCtx, req.getMessage());
+                        startStreaming(resolvedMessages, emitter, session, fullReply, traceCtx, req.getMessage(), ctx);
                     } else {
                         // 简单意图 (GENERAL_CHAT): RAG 检索后流式输出
                         try {
                             long ragStart = System.currentTimeMillis();
-                            String ragContext = ragService.retrieveContext(req.getMessage(), intentResult.getIntent().name());
+                            String ragContext = ragService.retrieveContext(req.getMessage(), intentResult.getPrimaryIntent().name());
                             int ragDuration = (int)(System.currentTimeMillis() - ragStart);
                             if (ragContext != null && !ragContext.isBlank()) {
                                 traceLogger.trace(traceCtx, "RAG_RETRIEVE",
@@ -298,7 +323,7 @@ public class ChatService {
                             log.warn("RAG retrieval failed for GENERAL_CHAT: {}", e.getMessage());
                         }
                         traceLogger.traceStreamingStart(traceCtx);
-                        startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage());
+                        startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage(), ctx);
                     }
                 } catch (Exception e) {
                     log.error("Tool resolution or streaming failed", e);
@@ -323,7 +348,7 @@ public class ChatService {
                 injectRagContext(messages, ragContext);
             }
             traceLogger.traceStreamingStart(traceCtx);
-            startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage());
+            startStreaming(messages, emitter, session, fullReply, traceCtx, req.getMessage(), ctx);
         }
 
         return emitter;
@@ -467,7 +492,14 @@ public class ChatService {
 
     private void startStreaming(List<dev.langchain4j.data.message.ChatMessage> messages,
                                 SseEmitter emitter, ChatSession session, StringBuilder fullReply,
-                                TraceLogger.TraceContext traceCtx, String originalUserMessage) {
+                                TraceLogger.TraceContext traceCtx, String originalUserMessage,
+                                ConversationContext ctx) {
+    // 某些 provider 的 streaming 接口不支持 tool-role / tool_calls / ToolExecutionResultMessage，
+    // 会直接报: "messages" in request are illegal.
+    // 这里做一次兼容降级：将工具相关消息折叠为纯文本 SystemMessage，再进入 streaming。
+    List<dev.langchain4j.data.message.ChatMessage> streamingMessages =
+        sanitizeMessagesForStreaming(messages, traceCtx);
+
         // 使用原子标志防止重复完成 emitter
         java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
         long streamStartTime = System.currentTimeMillis();
@@ -493,7 +525,7 @@ public class ChatService {
             }
         }, 1500, 1500, java.util.concurrent.TimeUnit.MILLISECONDS);
 
-        streamingModel.chat(messages, new StreamingChatResponseHandler() {
+    streamingModel.chat(streamingMessages, new StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
                 if (emitterCompleted.get()) return; // 已完成，跳过
@@ -551,6 +583,24 @@ public class ChatService {
                     }
                 });
 
+                // 异步记忆提取（双层记忆）
+                if (originalUserMessage.length() > 5) {
+                    CompletableFuture.runAsync(() -> {
+                        try {
+                            MemoryState memState = MemoryState.builder()
+                                    .userId(session.getUserId()).sessionId(session.getId())
+                                    .currentUserMessage(originalUserMessage)
+                                    .currentAiReply(finalReply)
+                                    .recentMessages(ctx.getRecentMessages())
+                                    .traceCtx(traceCtx)
+                                    .build();
+                            memoryPipelineGraph.executeMemoryExtraction(memState);
+                        } catch (Exception e) {
+                            traceLogger.traceError(traceCtx, "MEMORY_PIPELINE", e);
+                        }
+                    });
+                }
+
                 // 只在第一次调用时完成 emitter
                 if (!emitterCompleted.getAndSet(true)) {
                     try {
@@ -595,19 +645,105 @@ public class ChatService {
         });
     }
 
+    /**
+     * streaming provider 兼容层：将 tool 相关 message 转成文本。
+     *
+     * 目标：保证仅包含 system/user/assistant 三种角色的可序列化消息。
+     */
+    private List<dev.langchain4j.data.message.ChatMessage> sanitizeMessagesForStreaming(
+            List<dev.langchain4j.data.message.ChatMessage> messages,
+            TraceLogger.TraceContext traceCtx) {
+        if (messages == null || messages.isEmpty()) {
+            return messages;
+        }
+
+        int toolMsgCount = 0;
+        boolean hasToolCalls = false;
+        for (dev.langchain4j.data.message.ChatMessage m : messages) {
+            if (m == null) continue;
+            if (m instanceof ToolExecutionResultMessage) {
+                toolMsgCount++;
+            }
+            if (m instanceof AiMessage ai && ai.hasToolExecutionRequests()) {
+                hasToolCalls = true;
+            }
+        }
+
+        // 没有工具相关消息则不做任何处理
+        if (toolMsgCount == 0 && !hasToolCalls) {
+            traceLogger.trace(traceCtx, "STREAM_SANITIZE", "no_tool_messages");
+            return messages;
+        }
+
+        StringBuilder toolTranscript = new StringBuilder();
+        List<dev.langchain4j.data.message.ChatMessage> cleaned = new ArrayList<>(messages.size() + 1);
+
+        for (dev.langchain4j.data.message.ChatMessage m : messages) {
+            if (m == null) continue;
+
+            if (m instanceof ToolExecutionResultMessage tr) {
+                toolMsgCount++;
+                toolTranscript.append("\n[TOOL_RESULT] ");
+                // 不同版本 langchain4j 的 ToolExecutionResultMessage API 不一致，
+                // 这里避免调用可能不存在的方法（如 toolExecutionRequest()）。
+                toolTranscript.append("(tool execution result)\n");
+                String r = tr.text();
+                if (r != null && !r.isBlank()) {
+                    // 结果可能很长，截断避免超大 system message
+                    String trimmed = r.length() > 4000 ? r.substring(0, 4000) + "..." : r;
+                    toolTranscript.append(trimmed).append("\n");
+                }
+                continue; // drop tool-role message
+            }
+
+            if (m instanceof AiMessage ai && ai.hasToolExecutionRequests()) {
+                hasToolCalls = true;
+                toolTranscript.append("\n[TOOL_CALLS] ");
+                toolTranscript.append(ai.toolExecutionRequests().stream().map(ToolExecutionRequest::name).distinct().collect(Collectors.joining(", ")));
+                toolTranscript.append("\n");
+
+                // 这条 assistant message 通常不包含最终回答，只是 tool planning。
+                // 为兼容 streaming provider，这里不把它作为 assistant message 透传。
+                // 如果它有可见文本（极少），也记录进去。
+                if (ai.text() != null && !ai.text().isBlank()) {
+                    toolTranscript.append(ai.text()).append("\n");
+                }
+                continue;
+            }
+
+            cleaned.add(m);
+        }
+
+        if (!toolTranscript.isEmpty()) {
+            String injected = "\n\n--- 工具调用记录（系统整理）---\n" + toolTranscript;
+            // 注入到 system message 末尾（保留原系统提示）
+            if (!cleaned.isEmpty() && cleaned.get(0) instanceof SystemMessage sm) {
+                cleaned.set(0, SystemMessage.from(sm.text() + injected));
+            } else {
+                cleaned.add(0, SystemMessage.from(injected));
+            }
+        }
+
+        traceLogger.trace(traceCtx, "STREAM_SANITIZE",
+                "toolMsgCount=" + toolMsgCount + ", hasToolCalls=" + hasToolCalls + ", before=" + messages.size() + ", after=" + cleaned.size());
+        return cleaned;
+    }
+
     // ---- Message Building ----
 
     /**
      * 注入意图分析到系统提示，让 AI 知道分类结果后回答更精准
      */
     private void injectIntentContext(List<dev.langchain4j.data.message.ChatMessage> messages,
-                                      IntentClassifier.IntentResult intentResult) {
+                                      IntentClassification intentResult) {
         if (messages.isEmpty()) return;
         SystemMessage original = (SystemMessage) messages.get(0);
         String intentInfo = "\n\n--- 意图分析 ---\n" +
-                "用户意图: " + intentResult.getIntent().name() + "\n" +
+                "用户意图: " + intentResult.getPrimaryIntent().name() + "\n" +
+                "子意图: " + intentResult.getSubIntent().name() + "\n" +
                 "置信度: " + (int)(intentResult.getConfidence() * 100) + "%\n" +
-                "提及的实体: " + intentResult.getEntities() + "\n" +
+                "分类器: " + intentResult.getClassifiedBy().name() + "\n" +
+                "槽位: " + intentResult.getSlots() + "\n" +
                 "请根据以上意图分析给出合适回答。";
         messages.set(0, SystemMessage.from(original.text() + intentInfo));
     }

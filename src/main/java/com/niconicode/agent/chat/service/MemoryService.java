@@ -5,9 +5,11 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.niconicode.common.exception.BusinessException;
 import com.niconicode.conversation.entity.ChatMessage;
 import com.niconicode.conversation.entity.ChatSession;
+import com.niconicode.conversation.entity.SessionKeyContent;
 import com.niconicode.conversation.entity.SessionSummary;
 import com.niconicode.conversation.mapper.ChatMessageMapper;
 import com.niconicode.conversation.mapper.ChatSessionMapper;
+import com.niconicode.conversation.mapper.SessionKeyContentMapper;
 import com.niconicode.conversation.mapper.SessionSummaryMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +22,8 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
+import com.niconicode.common.util.SafeTemplates;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -28,6 +32,7 @@ public class MemoryService {
     private final ChatSessionMapper sessionMapper;
     private final ChatMessageMapper messageMapper;
     private final SessionSummaryMapper summaryMapper;
+    private final SessionKeyContentMapper keyContentMapper;
     private final ChatLanguageModel chatModel;
     private final TraceLogger traceLogger;
 
@@ -160,6 +165,8 @@ public class MemoryService {
                     new LambdaQueryWrapper<ChatMessage>().eq(ChatMessage::getSessionId, sessionId));
             summaryMapper.delete(
                     new LambdaQueryWrapper<SessionSummary>().eq(SessionSummary::getSessionId, sessionId));
+            keyContentMapper.delete(
+                    new LambdaQueryWrapper<SessionKeyContent>().eq(SessionKeyContent::getSessionId, sessionId));
             sessionMapper.deleteById(sessionId);
         }
     }
@@ -289,28 +296,27 @@ public class MemoryService {
 
             String prompt;
             if (existingSummary != null && !existingSummary.isBlank()) {
-                prompt = """
-                        请将以下现有摘要与新的对话内容合并，生成一份简洁的综合摘要。
-                        保留关键信息：用户偏好、讨论的技术话题、重要结论、待办事项。
-                        摘要限制在 500 字以内。
+        prompt = """
+            请将以下现有摘要与新的对话内容合并，生成一份简洁的综合摘要。
+            保留关键信息：用户偏好、讨论的技术话题、重要结论、待办事项。
+            摘要限制在 500 字以内。
 
-                        现有摘要：
-                        %s
+            现有摘要：
+            """ + SafeTemplates.s(existingSummary)
+            + """
 
-                        新对话内容：
-                        %s
-                        """.formatted(existingSummary, dialogText);
+            新对话内容：
+            """ + SafeTemplates.s(dialogText);
             } else {
-                prompt = """
-                        请简洁总结以下对话的关键信息，保留：
-                        1. 用户关注的技术话题和偏好
-                        2. 讨论中的重要结论和建议
-                        3. 用户提到的具体需求或待办事项
-                        摘要限制在 500 字以内。
+        prompt = """
+            请简洁总结以下对话的关键信息，保留：
+            1. 用户关注的技术话题和偏好
+            2. 讨论中的重要结论和建议
+            3. 用户提到的具体需求或待办事项
+            摘要限制在 500 字以内。
 
-                        对话内容：
-                        %s
-                        """.formatted(dialogText);
+            对话内容：
+            """ + SafeTemplates.s(dialogText);
             }
 
             String summary = chatModel.chat(prompt);
@@ -389,16 +395,15 @@ public class MemoryService {
             dialogText = dialogText.substring(0, 4000);
         }
 
-        String prompt = """
-                请简洁总结以下对话的关键信息，保留：
-                1. 用户关注的技术话题和偏好
-                2. 讨论中的重要结论和建议
-                3. 用户提到的具体需求或待办事项
-                摘要限制在 500 字以内。
+    String prompt = """
+        请简洁总结以下对话的关键信息，保留：
+        1. 用户关注的技术话题和偏好
+        2. 讨论中的重要结论和建议
+        3. 用户提到的具体需求或待办事项
+        摘要限制在 500 字以内。
 
-                对话内容：
-                %s
-                """.formatted(dialogText);
+        对话内容：
+        """ + SafeTemplates.s(dialogText);
 
         String newSummary = chatModel.chat(prompt);
         saveSummary(sessionId, newSummary, "MSG_DELETE");

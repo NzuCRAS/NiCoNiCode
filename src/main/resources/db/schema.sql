@@ -174,3 +174,31 @@ CREATE TABLE IF NOT EXISTS `session_summary` (
     `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
     INDEX `idx_session_version` (`session_id`, `version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 用户级记忆（跨会话持久化）
+CREATE TABLE IF NOT EXISTS `user_memory` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `user_id` BIGINT NOT NULL,
+    `memory_type` VARCHAR(30) NOT NULL COMMENT 'TECH_PREFERENCE/EXPERTISE_AREA/INTERACTION_STYLE/TEAM_CONTEXT/FREQUENTLY_ASKED',
+    `content` TEXT NOT NULL,
+    `confidence` DOUBLE DEFAULT 0.5,
+    `source_session_id` BIGINT,
+    `refresh_count` INT DEFAULT 1,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    `expired_at` DATETIME DEFAULT NULL,
+    INDEX `idx_user_type` (`user_id`, `memory_type`),
+    INDEX `idx_user_confidence` (`user_id`, `confidence` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 会话关键内容（实体/决策/代码片段）
+CREATE TABLE IF NOT EXISTS `session_key_content` (
+    `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+    `session_id` BIGINT NOT NULL,
+    `content_type` VARCHAR(20) NOT NULL COMMENT 'ENTITY/DECISION/CODE_SNIPPET',
+    `content` TEXT NOT NULL,
+    `source_message_id` BIGINT,
+    `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX `idx_session_type` (`session_id`, `content_type`),
+    INDEX `idx_session_created` (`session_id`, `created_at` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

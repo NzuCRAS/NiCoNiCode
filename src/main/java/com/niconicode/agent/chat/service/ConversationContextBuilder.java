@@ -6,6 +6,8 @@ import com.niconicode.auth.entity.User;
 import com.niconicode.auth.mapper.UserMapper;
 import com.niconicode.conversation.entity.ChatMessage;
 import com.niconicode.conversation.entity.ChatSession;
+import com.niconicode.conversation.entity.SessionKeyContent;
+import com.niconicode.conversation.entity.UserMemory;
 import com.niconicode.conversation.mapper.ChatMessageMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -23,6 +25,8 @@ public class ConversationContextBuilder {
     private final UserMapper userMapper;
     private final MemoryService memoryService;
     private final ChatMessageMapper messageMapper;
+    private final UserMemoryService userMemoryService;
+    private final SessionKeyContentService sessionKeyContentService;
 
     public ConversationContext build(Long userId, ChatSession session) {
         // 1. 查用户信息（单次 selectById）
@@ -37,7 +41,13 @@ public class ConversationContextBuilder {
                         .eq(ChatMessage::getSessionId, session.getId())
                         .isNull(ChatMessage::getDeletedAt));
 
-        // 4. 组装
+        // 4. 加载用户级记忆（索引查询，< 5ms）
+        List<UserMemory> userMemories = userMemoryService.getUserMemories(userId);
+
+        // 5. 加载会话关键内容（索引查询，< 5ms）
+        List<SessionKeyContent> keyContents = sessionKeyContentService.getSessionKeyContents(session.getId());
+
+        // 6. 组装
         return ConversationContext.builder()
                 .sessionId(session.getId())
                 .sessionTitle(session.getTitle())
@@ -46,6 +56,8 @@ public class ConversationContextBuilder {
                 .summary(session.getSummary())
                 .recentMessages(recent)
                 .totalActiveMessageCount(count)
+                .userMemories(userMemories)
+                .sessionKeyContents(keyContents)
                 .build();
     }
 }

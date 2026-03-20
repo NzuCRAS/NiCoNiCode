@@ -78,7 +78,11 @@
       "Bash(ls:*)",
       "Bash(find:*)",
       "Bash(jar xf:*)",
-      "Read(//tmp/lc4j_src/dev/langchain4j/model/openai/**)"
+      "Read(//tmp/lc4j_src/dev/langchain4j/model/openai/**)",
+      "Bash(sed:*)",
+      "Bash(xargs grep:*)",
+      "Bash(grep -r \"workflow\\\\|StateMachine\\\\|Graph\\\\|Pipeline\" /c/Code/JAVA/niconicode/src/main/java --include=*.java)",
+      "Bash(JAVA_TOOL_OPTIONS=\"-Duser.language=en -Duser.country=US\" mvn compile -q)"
     ]
   }
 }

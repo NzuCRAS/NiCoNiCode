@@ -8,6 +8,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import com.niconicode.common.util.SafeTemplates;
+
 import java.util.stream.Collectors;
 
 /**
@@ -144,7 +146,9 @@ public class WriterAgent {
             case LOW -> "信息有限（仅 Commit 活动），请如实说明，不要虚构细节。在报道中添加提示：'本次更新可能不是正式发布版本'。";
         };
 
-        return """
+    // 注意：不要使用 String.format / """.formatted 注入外部内容。
+    // 外部内容(网页/Markdown/Commit message)经常包含 '%'，会触发 UnknownFormatConversionException。
+    String promptPrefix = """
                 你是一位资深技术分析师，负责撰写详尽、充实、有深度的技术更新分析报告。
                 你的读者是开发者和技术决策者，他们需要全面了解这次更新的每一个细节。
 
@@ -196,11 +200,15 @@ public class WriterAgent {
                 - 代码或配置变更使用代码块
                 - 内容要充实详尽，不要惜字如金
 
-                数据充分度说明: %s
+        """;
 
-                原始数据:
-                %s
-                """.formatted(dataNote, context.toString());
+    StringBuilder sb = new StringBuilder(promptPrefix.length() + 4096);
+    sb.append(promptPrefix);
+    sb.append("\n数据充分度说明: ").append(SafeTemplates.s(dataNote)).append("\n\n");
+    sb.append("原始数据:\n");
+    sb.append(SafeTemplates.s(context));
+    sb.append("\n");
+    return sb.toString();
     }
 
     private String cleanMarkdownContent(String content) {

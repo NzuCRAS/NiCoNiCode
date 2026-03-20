@@ -39,13 +39,27 @@ public class TraceLogger {
         log.info("[TRACE:{}] [USER_MESSAGE] {}", ctx.traceId, truncate(message, 200));
     }
 
-    public void traceIntentClassification(TraceContext ctx, String intent, int durationMs) {
-        log.info("[TRACE:{}] [INTENT_CLASSIFY] intent={}, duration={}ms", ctx.traceId, intent, durationMs);
+    public void traceIntentClassification(TraceContext ctx, String intent, String subIntent,
+                                          String classifiedBy, int durationMs) {
+        log.info("[TRACE:{}] [INTENT_CLASSIFY] intent={}, subIntent={}, classifiedBy={}, duration={}ms",
+                ctx.traceId, intent, subIntent, classifiedBy, durationMs);
     }
 
     public void traceQueryRewrite(TraceContext ctx, String original, String rewritten, int durationMs) {
         log.info("[TRACE:{}] [QUERY_REWRITE] original={} -> rewritten={}, duration={}ms",
                 ctx.traceId, truncate(original, 100), truncate(rewritten, 100), durationMs);
+    }
+
+    public void traceQueryRewriteEnhanced(TraceContext ctx, String original, String rewritten,
+                                          String strategy, int subTaskCount, int durationMs) {
+        log.info("[TRACE:{}] [QUERY_REWRITE] original={} -> rewritten={}, strategy={}, subTasks={}, duration={}ms",
+                ctx.traceId, truncate(original, 100), truncate(rewritten, 100),
+                strategy, subTaskCount, durationMs);
+    }
+
+    public void traceQueryDag(TraceContext ctx, int totalTasks, int waves, int completedTasks, int durationMs) {
+        log.info("[TRACE:{}] [DAG_EXEC] totalTasks={}, waves={}, completed={}, duration={}ms",
+                ctx.traceId, totalTasks, waves, completedTasks, durationMs);
     }
 
     public void traceToolCall(TraceContext ctx, String toolName, String input, String output, int durationMs) {

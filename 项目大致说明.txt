@@ -203,3 +203,65 @@ java.lang.RuntimeException: java.net.http.HttpTimeoutException: request timed ou
 - 然后交给agent来进行ReAct处理，每轮处理都提供tool和RAG供其调用
 - 流式传输给用户，持久化到数据库中
 上述整个链路我们都需要进行全链路追踪，在日志中打印
+
+==================================
+
+关于对话agent的整体链路设计：
+
+首先整个链路中都要通过traceID进行全链路追踪
+
+优化之前的硬编码+logback方案，优化为：
+在请求入口生成Trace ID：通过一个过滤器（Filter）或拦截器（Interceptor）为每个请求生成一个唯一的Trace ID，并将其存入MDC（MDC.put("traceId", traceId)）。
+利用AOP拦截关键方法：使用Spring AOP编写切面，在方法执行前后打印日志（如入参、出参、耗时），日志中自动包含MDC中的Trace ID。
+确保异步线程传递Trace ID：如果使用了线程池（如@Async），需要将MDC上下文传递到子线程。
+日志配置：在logback-spring.xml的pattern中添加%X{traceId}以输出Trace ID。
+这样，整个调用链路中的所有日志都会自动带上同一个Trace ID，便于串联分析。
+
+然后优化每一个链路节点
+首先是用户发送消息，到后端进行的第一部操作 - 意图识别 + 重写
+
+意图识别这里采用三级级联策略（规则->向量->LLM） + 树形意图分支（主意图 + 子意图）
+L0噪音过滤
+L1规则，纯正则/关键词匹配，高精度场景快速返回
+L2向量相似度，内存方案，在内存中预先存储一些已经写定的样本进行相似度比对
+L3LLM兜底
+从L1到L3，失效依次降级，L1 + L2结果一致，直接返回结果，否则进入L3兜底，L3失败，使用L1/L2最高置信度结果，全部失败则返回一个general的结果
+（
+  L0 噪音过滤 → NOISE_SKIP
+  L1 规则 conf≥0.85 → 直接返回
+  L2 向量 conf≥0.80 → 返回（合并L1槽位）
+  L1+L2 一致 → +0.10增信 conf≥0.75 → 返回
+  L3 LLM 兜底（带 hint）→ 返回
+  L3 失败 → 降级 L1/L2 最佳 → 全失败 → GENERAL_CHAT(0.3)
+）
+
+关于用户query重写以及分task，采用以下设计
+
+重写策略——两级级联         
+                                                                                                                                                                                                                                                               Fast Path: 规则化重写（<1ms）                                                                                                                                                                                                                                                                 触发条件：意图分类来自 L1 且 confidence ≥ 0.85 且消息无指代词（它/这个/那个/前面/上面）且为单一问题                                                                                                                                                                                           
+处理方式：                                                                                                                                                                                                                                                                                    
+- 直接使用意图分类的 slots 填充查询模板                                                                                                                                                                                                                                                       
+- 例：Intent=TECH_QUERY/CONFIGURATION, slots={techName: "Spring Boot"} → "Spring Boot 配置方法"                                                                                                                                                                                               
+- 返回单个 SubTask，strategy = RULE_TEMPLATE        
+                                                                                                                                                                                                                                          
+Slow Path: LLM 重写 + DAG 拆分（200-500ms）                                                                                                                                                                                                                                                   
+触发条件：不满足 Fast Path 的所有消息                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+增强 prompt：                                                                                                                                                                                                                                                                                 
+- 输入意图分类结果（intent/subIntent/slots）作为 hint                                                                                                                                                                                                                                         
+- 要求输出 DAG 结构：每个子任务带 id、query、type、dependsOn                                                                                                                                                                                                                                  
+ - LLM 需判断子任务间的依赖关系 
+
+关于DAG设计，DAG执行引擎
+
+1. 从 SubTask 列表构建邻接表                                                                                                                                                                                                                                                                  2. 计算入度，找出所有根节点（入度=0）                                                                                                                                                                                                                                                         3. 按波次执行：                                                                                                                                                                                                                                                                               
+- Wave N：所有入度=0 的节点并行启动（CompletableFuture）                                                                                                                                                                                                                                    
+- 每个节点：调用 ragService.retrieveContext(task.query, task.intent.name())                                                                                                                                                                                                                 
+- 节点完成后：更新后继节点入度，新的入度=0 节点进入下一波                                                                                                                                                                                                                                   
+4. 有依赖的节点可访问前驱节点的 ragContext 作为补充上下文                                                                                                                                                                                                                                     
+5. 全部完成后：合并所有 SubTask 的 ragContext 为统一上下文     
+
+接下来看到上下文管理和记忆管理
+
+记忆管理的设计大致如下：
+使用LangGraph，通过图+状态的流转实现双层记忆，一层为用户级记忆，一层为会话层记忆，并且做好记忆隔离，避免同一用户的不同会话中出现记忆污染
+

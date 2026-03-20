@@ -120,9 +120,9 @@ public class VectorService {
 
     public void deleteBySourceId(Long sourceId) {
         String url = qdrantUrl + "/collections/" + collectionName + "/points/delete";
-        String body = """
-                {"filter":{"must":[{"key":"source_id","match":{"value":%d}}]}}
-                """.formatted(sourceId);
+    // 避免 formatted，统一使用安全拼接
+    String body = "{\"filter\":{\"must\":[{\"key\":\"source_id\",\"match\":{\"value\":"
+        + sourceId + "}}]}}";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         try {

@@ -1,7 +1,10 @@
 package com.niconicode.agent.chat.dto;
 
-import com.niconicode.agent.chat.service.IntentClassifier;
+import com.niconicode.agent.chat.service.SessionKeyContentService;
+import com.niconicode.agent.chat.service.UserMemoryService;
 import com.niconicode.conversation.entity.ChatMessage;
+import com.niconicode.conversation.entity.SessionKeyContent;
+import com.niconicode.conversation.entity.UserMemory;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -10,6 +13,7 @@ import lombok.Data;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 结构化对话上下文 — 统一承载会话、用户、历史记忆等信息，
@@ -33,8 +37,14 @@ public class ConversationContext {
     private List<ChatMessage> recentMessages = new ArrayList<>();
     private long totalActiveMessageCount;
 
+    // 双层记忆
+    @Builder.Default
+    private List<UserMemory> userMemories = new ArrayList<>();
+    @Builder.Default
+    private List<SessionKeyContent> sessionKeyContents = new ArrayList<>();
+
     // 意图元数据（意图识别后填充）
-    private IntentClassifier.IntentResult lastIntentResult;
+    private IntentClassification lastIntentClassification;
 
     /**
      * 构建 LangChain4j 消息列表，替代原 ChatService.buildMessages()
@@ -44,8 +54,21 @@ public class ConversationContext {
 
         List<dev.langchain4j.data.message.ChatMessage> messages = new ArrayList<>();
 
-        // SystemMessage = 系统提示 + 摘要 + 用户信息
+        // SystemMessage = 系统提示 + 用户画像 + 会话要点 + 摘要 + 用户信息
         StringBuilder systemContent = new StringBuilder(systemPrompt);
+
+        // 用户画像（跨会话持久化记忆）
+        String userProfile = UserMemoryService.formatForContext(userMemories);
+        if (!userProfile.isEmpty()) {
+            systemContent.append("\n\n").append(userProfile);
+        }
+
+        // 会话要点（本次会话关键内容）
+        String keyContent = SessionKeyContentService.formatForContext(sessionKeyContents);
+        if (!keyContent.isEmpty()) {
+            systemContent.append("\n\n").append(keyContent);
+        }
+
         if (summary != null && !summary.isBlank()) {
             systemContent.append("\n\n之前对话的摘要：\n").append(summary);
         }
@@ -95,10 +118,18 @@ public class ConversationContext {
             context.append(content.length() > 400 ? content.substring(0, 400) : content)
                     .append("\n");
         }
-        // 上次意图实体
-        List<String> entities = getEntitiesSafe(lastIntentResult);
-        if (entities != null && !entities.isEmpty()) {
-            context.append("上次意图实体: ").append(entities).append("\n");
+        // 上次意图槽位
+        if (lastIntentClassification != null) {
+            Map<String, String> slots = lastIntentClassification.getSlots();
+            if (slots != null && !slots.isEmpty()) {
+                context.append("上次意图槽位: ").append(slots).append("\n");
+            }
+        }
+        // 用户画像摘要（帮助意图分类器利用用户偏好消歧）
+        String userProfile = UserMemoryService.formatForContext(userMemories);
+        if (!userProfile.isEmpty()) {
+            String profileBrief = userProfile.length() > 200 ? userProfile.substring(0, 200) : userProfile;
+            context.append(profileBrief).append("\n");
         }
         return context.toString();
     }
@@ -133,23 +164,6 @@ public class ConversationContext {
                 return v != null ? v.toString() : "";
             } catch (Exception e) {
                 return "";
-            }
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static List<String> getEntitiesSafe(IntentClassifier.IntentResult intentResult) {
-        if (intentResult == null) return null;
-        try {
-            return (List<String>) IntentClassifier.IntentResult.class.getMethod("getEntities").invoke(intentResult);
-        } catch (Exception ignore) {
-            try {
-                java.lang.reflect.Field f = IntentClassifier.IntentResult.class.getDeclaredField("entities");
-                f.setAccessible(true);
-                Object v = f.get(intentResult);
-                return (List<String>) v;
-            } catch (Exception e) {
-                return null;
             }
         }
     }

@@ -9,6 +9,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import com.niconicode.common.util.SafeTemplates;
+
 /**
  * 审核 Agent
  * 审核报道质量 + 技术评分 + 发布决策
@@ -80,21 +82,21 @@ public class ReviewerAgent {
      * 返回修订后的内容（或原内容如果无需修改）
      */
     private String reviewContent(String reportContent) {
-        String prompt = """
-                你是一位技术报道审核编辑。请审核以下报道内容，并返回修订后的版本。
+    // 注意：不要使用 """.formatted(reportContent)
+    String prompt = """
+        你是一位技术报道审核编辑。请审核以下报道内容，并返回修订后的版本。
 
-                审核要点：
-                1. 删除任何新闻腔调（"业内专家指出"、"据了解"、"值得一提的是"等）
-                2. 删除虚构的信息（如果内容中有无法从原始数据推断的断言）
-                3. 确保技术术语使用准确
-                4. 确保 Markdown 格式正确
+        审核要点：
+        1. 删除任何新闻腔调（"业内专家指出"、"据了解"、"值得一提的是"等）
+        2. 删除虚构的信息（如果内容中有无法从原始数据推断的断言）
+        3. 确保技术术语使用准确
+        4. 确保 Markdown 格式正确
 
-                如果内容质量良好无需修改，请原样返回。
-                直接返回修订后的 Markdown 内容，不要添加额外说明。
+        如果内容质量良好无需修改，请原样返回。
+        直接返回修订后的 Markdown 内容，不要添加额外说明。
 
-                待审核内容:
-                %s
-                """.formatted(reportContent);
+        待审核内容:
+        """ + SafeTemplates.s(reportContent);
 
         try {
             String revised = chatModel.chat(prompt).trim();
