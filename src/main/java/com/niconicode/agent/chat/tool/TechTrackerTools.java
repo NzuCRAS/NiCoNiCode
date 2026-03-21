@@ -38,7 +38,7 @@ public class TechTrackerTools {
                 return "在 " + startDate + " 至 " + endDate + " 期间没有已发布的技术报道";
             }
             return reports.stream()
-                    .map(r -> "【" + r.getTitle() + "】(" + r.getPublishedAt() + ")"
+                    .map(r -> "【" + r.getTitle() + "】[报道#" + r.getId() + "](" + r.getPublishedAt() + ")"
                             + "\n技术指数: " + (r.getTechIndex() != null ? r.getTechIndex() : "N/A")
                             + "\n" + (r.getChangeSummary() != null ? r.getChangeSummary() : ""))
                     .collect(Collectors.joining("\n\n---\n\n"));
@@ -55,7 +55,7 @@ public class TechTrackerTools {
             return "未找到与「" + keyword + "」相关的报道";
         }
         return reports.stream()
-                .map(r -> "【" + r.getTitle() + "】\n" + (r.getChangeSummary() != null ? r.getChangeSummary() : ""))
+                .map(r -> "【" + r.getTitle() + "】[报道#" + r.getId() + "]\n" + (r.getChangeSummary() != null ? r.getChangeSummary() : ""))
                 .collect(Collectors.joining("\n\n---\n\n"));
     }
 
@@ -108,7 +108,7 @@ public class TechTrackerTools {
             return tech.getName() + " 目前没有已发布的报道";
         }
         return reports.stream()
-                .map(r -> "【" + r.getTitle() + "】(" + r.getPublishedAt() + ")\n"
+                .map(r -> "【" + r.getTitle() + "】[报道#" + r.getId() + "](" + r.getPublishedAt() + ")\n"
                         + (r.getChangeSummary() != null ? r.getChangeSummary() : ""))
                 .collect(Collectors.joining("\n\n---\n\n"));
     }

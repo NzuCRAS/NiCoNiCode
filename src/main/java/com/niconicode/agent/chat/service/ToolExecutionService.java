@@ -21,13 +21,16 @@ import java.util.Map;
 public class ToolExecutionService {
 
     private final List<Object> toolObjects;
+    private final ToolCacheService toolCacheService;
     private final List<ToolSpecification> toolSpecifications = new ArrayList<>();
     private final Map<String, ToolExecutor> toolExecutors = new HashMap<>();
 
     public ToolExecutionService(
             com.niconicode.agent.chat.tool.KnowledgeMcpTools knowledgeMcpTools,
-            com.niconicode.agent.chat.tool.TechTrackerTools techTrackerTools) {
+            com.niconicode.agent.chat.tool.TechTrackerTools techTrackerTools,
+            ToolCacheService toolCacheService) {
         this.toolObjects = List.of(knowledgeMcpTools, techTrackerTools);
+        this.toolCacheService = toolCacheService;
     }
 
     @PostConstruct
@@ -61,10 +64,22 @@ public class ToolExecutionService {
             log.warn("Unknown tool requested: {}", toolName);
             return "错误: 未知的工具「" + toolName + "」";
         }
+
+        // 缓存检查
+        String cached = toolCacheService.getCached(toolName, request.arguments());
+        if (cached != null) {
+            log.info("Tool {} cache HIT, returning cached result", toolName);
+            return cached;
+        }
+
         try {
             log.info("Executing tool: {} with args: {}", toolName, request.arguments());
             String result = executor.execute(request, null);
             log.debug("Tool {} result length: {}", toolName, result != null ? result.length() : 0);
+
+            // 缓存结果
+            toolCacheService.put(toolName, request.arguments(), result);
+
             return result;
         } catch (Exception e) {
             log.error("Tool execution failed: {}", toolName, e);

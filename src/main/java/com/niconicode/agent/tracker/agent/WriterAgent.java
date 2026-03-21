@@ -56,6 +56,9 @@ public class WriterAgent {
             String title = extractTitle(cleaned, tech, searchResult);
             traceLogger.trace(traceCtx, "WRITER_TITLE", "title=" + title);
 
+            // 从内容中移除已提取的标题行，避免标题重复
+            cleaned = removeTitleLine(cleaned);
+
             return new WriteResult(title, cleaned);
         } catch (Exception e) {
             log.error("WriterAgent failed for {}", tech.getName(), e);
@@ -88,6 +91,36 @@ public class WriterAgent {
         // 降级：机械拼接（保底，避免 NPE）
         return tech.getName() + " " + searchResult.getDetectedVersion()
                 + " " + getModeLabel(searchResult.getUpdateMode());
+    }
+
+    /**
+     * 从内容中移除首个 # 标题行及其紧跟的空行，避免标题与正文重复。
+     * 仅移除 # 一级标题行（与 extractTitle 优先使用的路径一致）。
+     * 如果 extractTitle 走的是 ## 或降级路径，则原样返回。
+     */
+    private String removeTitleLine(String content) {
+        if (content == null || content.isBlank()) return content;
+        String[] lines = content.split("\n", -1);
+        int titleIdx = -1;
+        for (int i = 0; i < lines.length; i++) {
+            String trimmed = lines[i].trim();
+            if (trimmed.startsWith("# ") && trimmed.length() > 2) {
+                titleIdx = i;
+                break;
+            }
+        }
+        if (titleIdx < 0) return content;
+
+        StringBuilder sb = new StringBuilder();
+        boolean skipNextEmpty = true;
+        for (int i = 0; i < lines.length; i++) {
+            if (i == titleIdx) continue;
+            if (skipNextEmpty && i == titleIdx + 1 && lines[i].trim().isEmpty()) continue;
+            skipNextEmpty = false;
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(lines[i]);
+        }
+        return sb.toString();
     }
 
     private String getModeLabel(String mode) {

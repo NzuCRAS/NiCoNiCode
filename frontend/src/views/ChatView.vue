@@ -49,6 +49,25 @@
                 ? 'bg-primary text-white rounded-br-md'
                 : 'bg-white border border-gray-200 rounded-bl-md'
             ]">
+              <!-- 思考链面板 -->
+              <details v-if="msg.role === 'ASSISTANT' && msg.thinking" class="thinking-panel mb-2">
+                <summary class="text-xs text-gray-400 cursor-pointer select-none hover:text-gray-600">
+                  💭 思考过程 · {{ strategyLabel(msg.thinking.strategy) }}
+                </summary>
+                <div class="text-xs text-gray-500 mt-1 space-y-1 pl-2 border-l-2 border-indigo-200">
+                  <div>🎯 意图: {{ intentLabel(msg.thinking.intent) }} / {{ msg.thinking.subIntent }} ({{ Math.round(msg.thinking.confidence * 100) }}%)</div>
+                  <div v-if="msg.thinking.rewrittenQuery">🔄 重写: {{ msg.thinking.rewrittenQuery }}</div>
+                  <div v-if="msg.thinking.tools.length">🔧 工具: {{ msg.thinking.tools.map(t => t.label).join('、') }}</div>
+                  <div v-if="msg.thinking.ragDocs.length">📚 检索文档:
+                    <div v-for="doc in msg.thinking.ragDocs" :key="doc.id" class="ml-2">
+                      <router-link :to="`/knowledge/${doc.id}`" class="text-indigo-500 hover:underline">
+                        {{ doc.title }}
+                      </router-link>
+                      <span class="text-gray-400 ml-1">({{ Math.round(doc.score * 100) }}%)</span>
+                    </div>
+                  </div>
+                </div>
+              </details>
               <div v-if="msg.role === 'ASSISTANT'" class="markdown-body" v-html="renderMarkdown(msg.content)"></div>
               <div v-else class="whitespace-pre-wrap">{{ msg.content }}</div>
             </div>
@@ -115,7 +134,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chat'
 import { marked } from 'marked'
 
@@ -124,6 +143,7 @@ marked.setOptions({ breaks: true, gfm: true })
 
 const chatStore = useChatStore()
 const route = useRoute()
+const router = useRouter()
 const input = ref('')
 const messagesContainer = ref<HTMLElement>()
 const editingMessageId = ref<number | null>(null)
@@ -135,6 +155,8 @@ const isStreaming = computed(() => {
 })
 
 onMounted(async () => {
+  // 注册全局路由跳转方法，供 v-html 内的 onclick 使用
+  ;(window as any).__routerPush = (path: string) => router.push(path)
   await chatStore.loadSessions()
   if (route.params.id) {
     await chatStore.loadMessages(Number(route.params.id))
@@ -246,10 +268,40 @@ async function stopGeneration() {
 function renderMarkdown(content: string): string {
   if (!content) return ''
   try {
-    return marked.parse(content) as string
+    let html = marked.parse(content) as string
+    // [报道#42] → 可点击链接
+    html = html.replace(/\[报道#(\d+)\]/g,
+      '<a href="/reports/$1" class="source-link" onclick="event.preventDefault();window.__routerPush(\'/reports/$1\')">📄报道原文</a>')
+    // [文档#15] → 知识库链接
+    html = html.replace(/\[文档#(\d+)\]/g,
+      '<a href="/knowledge/$1" class="source-link" onclick="event.preventDefault();window.__routerPush(\'/knowledge/$1\')">📄文档原文</a>')
+    return html
   } catch {
     return content
   }
+}
+
+function intentLabel(intent: string): string {
+  const map: Record<string, string> = {
+    VERSION_UPDATE: '版本更新',
+    REPORT_QUERY: '报道查询',
+    TECH_QUERY: '技术咨询',
+    CODE_HELP: '代码帮助',
+    COMPARISON: '技术对比',
+    GITHUB_ANALYSIS: 'GitHub分析',
+    GENERAL_CHAT: '闲聊',
+    UNCLEAR: '不明确',
+  }
+  return map[intent] || intent
+}
+
+function strategyLabel(strategy: string): string {
+  const map: Record<string, string> = {
+    DIRECT_ANSWER: '直接回答',
+    RAG_ONLY: '知识检索',
+    WORKFLOW: '工作流',
+  }
+  return map[strategy] || strategy
 }
 
 /** 将驼峰工具名转换为可读文字，并去重展示
@@ -270,3 +322,36 @@ function formatToolNames(tools: string[]): string {
   return labels.join('、') + '...'
 }
 </script>
+
+<style scoped>
+.thinking-panel summary {
+  list-style: none;
+}
+.thinking-panel summary::-webkit-details-marker {
+  display: none;
+}
+.thinking-panel summary::before {
+  content: '▶ ';
+  font-size: 0.6rem;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.thinking-panel[open] summary::before {
+  transform: rotate(90deg);
+}
+:deep(.source-link) {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.75rem;
+  color: #4f46e5;
+  background: #eef2ff;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+:deep(.source-link:hover) {
+  background: #c7d2fe;
+}
+</style>

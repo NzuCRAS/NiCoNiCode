@@ -13,4 +13,5 @@ public class KnowledgeDocResp {
     private String tags;
     private Integer viewCount;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

@@ -12,8 +12,10 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 结构化对话上下文 — 统一承载会话、用户、历史记忆等信息，
@@ -45,6 +47,10 @@ public class ConversationContext {
 
     // 意图元数据（意图识别后填充）
     private IntentClassification lastIntentClassification;
+
+    // 会话级 RAG 去重：已检索过的文档 ID
+    @Builder.Default
+    private Set<String> retrievedDocIds = new HashSet<>();
 
     /**
      * 构建 LangChain4j 消息列表，替代原 ChatService.buildMessages()

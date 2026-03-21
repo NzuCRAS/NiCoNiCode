@@ -13,6 +13,18 @@ interface Message {
   role: string
   content: string
   createdAt: string
+  thinking?: ThinkingData
+}
+
+interface ThinkingData {
+  intent: string
+  subIntent: string
+  confidence: number
+  classifiedBy: string
+  strategy: string
+  rewrittenQuery?: string
+  tools: { name: string; label: string }[]
+  ragDocs: { id: number; title: string; score: number }[]
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -23,6 +35,7 @@ export const useChatStore = defineStore('chat', () => {
   const abortController = ref<AbortController | null>(null)
   const toolsInUse = ref<string[]>([])
   const streamingStarted = ref(false)
+  const thinkingData = ref<ThinkingData | null>(null)
   // 用于显式触发 UI 重绘（保险丝）：流式场景中 token 可能极碎，深层对象变更有时不会立刻驱动组件更新
   const renderTick = ref(0)
   const messages = computed(() => {
@@ -86,6 +99,10 @@ export const useChatStore = defineStore('chat', () => {
         if (!pendingText) return
         if (!streamingStarted.value) {
           streamingStarted.value = true
+          // 附着思考链数据到 AI 消息
+          if (thinkingData.value) {
+            assistantMsg.thinking = thinkingData.value
+          }
           sessionMsgs.push(assistantMsg)
         }
         assistantMsg.content += pendingText
@@ -116,6 +133,10 @@ export const useChatStore = defineStore('chat', () => {
               const newTools: string[] = toolData.tools || []
               newTools.forEach(t => toolsSeen.add(t))
               toolsInUse.value = Array.from(toolsSeen)
+            } catch { /* ignore */ }
+          } else if (currentEvent === 'thinking') {
+            try {
+              thinkingData.value = JSON.parse(data)
             } catch { /* ignore */ }
           } else if (currentEvent === 'done') {
             toolsInUse.value = []
@@ -263,6 +284,7 @@ export const useChatStore = defineStore('chat', () => {
     abortController.value = controller
     toolsInUse.value = []
     streamingStarted.value = false
+    thinkingData.value = null
 
     try {
       const response = await createSSEFetch(sessionId, message, controller)
@@ -273,6 +295,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController.value = null
       toolsInUse.value = []
       streamingStarted.value = false
+      thinkingData.value = null
       loadingSessionId.value = null
     }
   }
@@ -314,6 +337,7 @@ export const useChatStore = defineStore('chat', () => {
     abortController.value = controller
     toolsInUse.value = []
     streamingStarted.value = false
+    thinkingData.value = null
 
     try {
       const response = await createSSEFetch(sessionId, newContent, controller)
@@ -324,6 +348,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController.value = null
       toolsInUse.value = []
       streamingStarted.value = false
+      thinkingData.value = null
       loadingSessionId.value = null
     }
   }
@@ -358,6 +383,7 @@ export const useChatStore = defineStore('chat', () => {
     abortController.value = controller
     toolsInUse.value = []
     streamingStarted.value = false
+    thinkingData.value = null
 
     try {
       const response = await createSSEFetch(sessionId, lastUserMsg, controller)
@@ -368,6 +394,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController.value = null
       toolsInUse.value = []
       streamingStarted.value = false
+      thinkingData.value = null
       loadingSessionId.value = null
     }
   }
@@ -397,7 +424,7 @@ export const useChatStore = defineStore('chat', () => {
 
   return {
   sessions, currentSessionId, messages, renderTick, loadingSessionId, isCurrentSessionLoading,
-    abortController, toolsInUse, streamingStarted,
+    abortController, toolsInUse, streamingStarted, thinkingData,
     loadSessions, createSession, loadMessages, sendMessage, sendMessageStream,
     deleteSession, deleteMessage, deleteMessagesAfter, editAndResend,
     regenerateLastReply, cancelStream

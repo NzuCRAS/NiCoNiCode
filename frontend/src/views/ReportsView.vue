@@ -24,6 +24,7 @@
             <router-link v-if="getTechName(reports[0].trackedTechId)" :to="`/tech/${reports[0].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[0].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[0].publishedAt) }}</span>
+            <span v-if="showUpdatedAt(reports[0])" class="text-gray-400">· 更新 {{ formatDate(reports[0].updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (reports[0].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[0].publishedAt)">
               {{ calcCompositeScore(reports[0]).toFixed(0) }}
             </span>
@@ -53,6 +54,7 @@
             <router-link v-if="getTechName(r.trackedTechId)" :to="`/tech/${r.trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(r.trackedTechId) }}</router-link>
             <span>{{ formatDate(r.publishedAt) }}</span>
+            <span v-if="showUpdatedAt(r)" class="text-gray-400">· 更新 {{ formatDate(r.updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (r.techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(r.publishedAt)">
               {{ calcCompositeScore(r).toFixed(0) }}
             </span>
@@ -68,6 +70,7 @@
             <router-link v-if="getTechName(reports[4].trackedTechId)" :to="`/tech/${reports[4].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[4].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[4].publishedAt) }}</span>
+            <span v-if="showUpdatedAt(reports[4])" class="text-gray-400">· 更新 {{ formatDate(reports[4].updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (reports[4].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[4].publishedAt)">
               {{ calcCompositeScore(reports[4]).toFixed(0) }}
             </span>
@@ -83,6 +86,7 @@
             <router-link v-if="getTechName(reports[5].trackedTechId)" :to="`/tech/${reports[5].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[5].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[5].publishedAt) }}</span>
+            <span v-if="showUpdatedAt(reports[5])" class="text-gray-400">· 更新 {{ formatDate(reports[5].updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (reports[5].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[5].publishedAt)">
               {{ calcCompositeScore(reports[5]).toFixed(0) }}
             </span>
@@ -98,6 +102,7 @@
             <router-link v-if="getTechName(r.trackedTechId)" :to="`/tech/${r.trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(r.trackedTechId) }}</router-link>
             <span>{{ formatDate(r.publishedAt) }}</span>
+            <span v-if="showUpdatedAt(r)" class="text-gray-400">· 更新 {{ formatDate(r.updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (r.techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(r.publishedAt)">
               {{ calcCompositeScore(r).toFixed(0) }}
             </span>
@@ -113,6 +118,7 @@
             <router-link v-if="getTechName(reports[9].trackedTechId)" :to="`/tech/${reports[9].trackedTechId}`"
               class="badge-tech" @click.stop>{{ getTechName(reports[9].trackedTechId) }}</router-link>
             <span>{{ formatDate(reports[9].publishedAt) }}</span>
+            <span v-if="showUpdatedAt(reports[9])" class="text-gray-400">· 更新 {{ formatDate(reports[9].updatedAt) }}</span>
             <span class="badge-score" :title="'技术指数 ' + (reports[9].techIndex || 500) + ' + 时间指数 ' + calcTimeIndex(reports[9].publishedAt)">
               {{ calcCompositeScore(reports[9]).toFixed(0) }}
             </span>
@@ -177,6 +183,10 @@ function stripContent(content: string | null, maxLen: number): string {
 function formatDate(date: string) {
   if (!date) return ''
   return new Date(date).toLocaleDateString('zh-CN')
+}
+
+function showUpdatedAt(report: any): boolean {
+  return report.updatedAt && report.updatedAt !== report.publishedAt && report.updatedAt !== report.createdAt
 }
 
 /**

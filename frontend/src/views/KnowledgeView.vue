@@ -45,6 +45,7 @@
               {{ sourceTypeLabel(doc.sourceType) }}
             </span>
             <span class="text-xs text-gray-400">{{ formatDate(doc.createdAt) }}</span>
+            <span v-if="doc.updatedAt && doc.updatedAt !== doc.createdAt" class="text-xs text-gray-400">· 更新于 {{ formatDate(doc.updatedAt) }}</span>
             <span class="text-xs text-gray-400">{{ doc.viewCount }} 次查看</span>
           </div>
           <h3 class="font-semibold text-gray-900 mb-1">{{ doc.title }}</h3>

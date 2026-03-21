@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.regex.Pattern;
 
+import com.niconicode.agent.chat.dto.ConversationContext;
 import com.niconicode.common.util.SafeTemplates;
 
 @Slf4j
@@ -54,6 +55,23 @@ public class QueryRewriter {
 
     public RewriteResult rewrite(String query, String conversationContext) {
         return rewrite(query, conversationContext, null);
+    }
+
+    /**
+     * 记忆驱动增强：接受 ConversationContext 以利用用户记忆辅助重写
+     */
+    public RewriteResult rewrite(String query, String conversationContext,
+                                 IntentClassification intentClassification,
+                                 ConversationContext convCtx) {
+        // 提取用户偏好信息注入到上下文
+        String enhancedContext = conversationContext;
+        if (convCtx != null) {
+            String memoryHint = extractMemoryHints(convCtx);
+            if (!memoryHint.isEmpty()) {
+                enhancedContext = (enhancedContext != null ? enhancedContext : "") + memoryHint;
+            }
+        }
+        return rewrite(query, enhancedContext, intentClassification);
     }
 
     // ---- 主入口：两级级联重写 ----
@@ -318,6 +336,36 @@ public class QueryRewriter {
             i++;
         }
         return tasks;
+    }
+
+    // ---- 记忆驱动 ----
+
+    /**
+     * 从 ConversationContext 中提取用户偏好，帮助消歧和调整查询
+     */
+    private String extractMemoryHints(ConversationContext ctx) {
+        if (ctx.getUserMemories() == null || ctx.getUserMemories().isEmpty()) {
+            return "";
+        }
+        StringBuilder hints = new StringBuilder("\n用户偏好（用于消歧）:\n");
+        for (var mem : ctx.getUserMemories()) {
+            String type = mem.getMemoryType();
+            String value = mem.getContent();
+            if (value == null || value.isBlank()) continue;
+
+            if ("TECH_PREFERENCE".equals(type) || "EXPERTISE_AREA".equals(type)
+                    || "FREQUENTLY_ASKED".equals(type)) {
+                String label = switch (type) {
+                    case "TECH_PREFERENCE" -> "技术偏好";
+                    case "EXPERTISE_AREA" -> "专业领域";
+                    case "FREQUENTLY_ASKED" -> "常问话题";
+                    default -> type;
+                };
+                hints.append("- ").append(label).append(": ").append(
+                        value.length() > 100 ? value.substring(0, 100) : value).append("\n");
+            }
+        }
+        return hints.length() > 30 ? hints.toString() : "";
     }
 
     // ---- 便捷工具 ----

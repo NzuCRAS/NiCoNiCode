@@ -17,4 +17,5 @@ public class TechReportResp {
     private String status;
     private LocalDateTime publishedAt;
     private LocalDateTime createdAt;
+    private LocalDateTime updatedAt;
 }

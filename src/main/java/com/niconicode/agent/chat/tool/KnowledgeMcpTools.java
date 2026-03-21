@@ -25,7 +25,12 @@ public class KnowledgeMcpTools {
             return "未找到相关知识库内容";
         }
         return results.stream()
-                .map(r -> "【" + r.getOrDefault("title", "") + "】\n" + r.getOrDefault("text", ""))
+                .map(r -> {
+                    String title = String.valueOf(r.getOrDefault("title", ""));
+                    Object sourceId = r.get("source_id");
+                    String idTag = sourceId != null ? "[文档#" + sourceId + "]" : "";
+                    return "【" + title + "】" + idTag + "\n" + r.getOrDefault("text", "");
+                })
                 .collect(Collectors.joining("\n\n---\n\n"));
     }
 }

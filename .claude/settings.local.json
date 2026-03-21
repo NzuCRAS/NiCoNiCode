@@ -82,7 +82,8 @@
       "Bash(sed:*)",
       "Bash(xargs grep:*)",
       "Bash(grep -r \"workflow\\\\|StateMachine\\\\|Graph\\\\|Pipeline\" /c/Code/JAVA/niconicode/src/main/java --include=*.java)",
-      "Bash(JAVA_TOOL_OPTIONS=\"-Duser.language=en -Duser.country=US\" mvn compile -q)"
+      "Bash(JAVA_TOOL_OPTIONS=\"-Duser.language=en -Duser.country=US\" mvn compile -q)",
+      "Bash(echo \"EXIT:$?\")"
     ]
   }
 }
