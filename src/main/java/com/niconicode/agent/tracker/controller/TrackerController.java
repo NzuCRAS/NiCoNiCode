@@ -3,6 +3,8 @@ package com.niconicode.agent.tracker.controller;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.niconicode.agent.tracker.entity.TechReport;
 import com.niconicode.agent.tracker.entity.TrackedTech;
+import com.niconicode.agent.tracker.dto.TrackerGraphResp;
+import com.niconicode.agent.tracker.dto.TrackerNetworkResp;
 import com.niconicode.agent.tracker.service.TrackerService;
 import com.niconicode.common.result.R;
 import com.niconicode.knowledge.entity.KnowledgeDoc;
@@ -22,16 +24,18 @@ public class TrackerController {
     public R<Page<TechReport>> listReports(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int size,
+            @RequestParam(required = false) String status,
             @RequestParam(required = false) Long categoryId) {
-        return R.ok(trackerService.listReports(page, size, categoryId));
+        return R.ok(trackerService.listAllReports(page, size, status, categoryId));
     }
 
     @GetMapping("/reports/by-score")
     public R<Page<TechReport>> listReportsByScore(
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "10") int size,
+            @RequestParam(required = false) String status,
             @RequestParam(required = false) Long categoryId) {
-        return R.ok(trackerService.listReportsByScore(page, size, categoryId));
+        return R.ok(trackerService.listReportsByScore(page, size, status, categoryId));
     }
 
     @GetMapping("/reports/{id}")
@@ -47,6 +51,28 @@ public class TrackerController {
     @GetMapping("/techs")
     public R<List<TrackedTech>> listTechs() {
         return R.ok(trackerService.listTrackedTechs());
+    }
+
+    /**
+     * 首页知识图谱：类型(Category) -> 技术(TrackedTech) -> 相关报道(Top N by techIndex)
+     */
+    @GetMapping("/graph")
+    public R<List<TrackerGraphResp.CategoryNode>> graph(
+            @RequestParam(defaultValue = "5") int reportsPerTech,
+            @RequestParam(defaultValue = "30") int maxTechs) {
+        return R.ok(trackerService.buildGraph(reportsPerTech, maxTechs));
+    }
+
+    /**
+     * 语义网络（真实“知识图谱”）：nodes + edges。
+     */
+    @GetMapping("/graph/network")
+    public R<TrackerNetworkResp> network(
+            @RequestParam(defaultValue = "5") int reportsPerTech,
+            @RequestParam(defaultValue = "30") int maxTechs,
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = "false") boolean includeTechCooccurrence) {
+        return R.ok(trackerService.buildNetwork(reportsPerTech, maxTechs, status, includeTechCooccurrence));
     }
 
     @GetMapping("/techs/{id}")

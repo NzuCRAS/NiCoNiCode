@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
+import com.niconicode.agent.tracker.dto.TrackerGraphResp;
+import com.niconicode.agent.tracker.dto.TrackerNetworkResp;
 import com.niconicode.agent.tracker.entity.HotTopic;
 import com.niconicode.agent.tracker.entity.TechReport;
 import com.niconicode.agent.tracker.entity.TrackedTech;
@@ -27,14 +29,59 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashMap;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.Base64;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TrackerService {
+
+    private static final Pattern SAFE_NODE_KEY = Pattern.compile("[^a-zA-Z0-9_\\-:.]+" );
+
+    private static String safeKey(String raw) {
+        if (raw == null) return "";
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty()) return "";
+
+    // 仅 ASCII 时走可读 key（与旧逻辑兼容）
+    boolean asciiOnly = trimmed.chars().allMatch(ch -> ch <= 0x7F);
+    if (asciiOnly) {
+        String normalized = SAFE_NODE_KEY.matcher(trimmed).replaceAll("_");
+        return normalized.isEmpty() ? "_" : normalized;
+    }
+
+    // 非 ASCII（例如中文分类名）：URL-safe Base64，保证“唯一且稳定”
+    String b64 = Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(trimmed.getBytes(StandardCharsets.UTF_8));
+    return "b64_" + b64;
+    }
+
+    private static String categoryNodeId(String category) {
+        return "category:" + safeKey(category);
+    }
+
+    private static String techNodeId(Long techId) {
+        return "tech:" + techId;
+    }
+
+    private static String reportNodeId(Long reportId) {
+        return "report:" + reportId;
+    }
+
+    private static void putIfNotNull(Map<String, Object> props, String key, Object value) {
+        if (value != null) props.put(key, value);
+    }
 
     private final TrackedTechMapper techMapper;
     private final TechReportMapper reportMapper;
@@ -71,13 +118,15 @@ public class TrackerService {
      * - 使用高效的排序算法（Java TimSort）
      * - 避免占用数据库缓存
      */
-    public Page<TechReport> listReportsByScore(int page, int size, Long categoryId) {
+    public Page<TechReport> listReportsByScore(int page, int size, String status, Long categoryId) {
         // 第一步：获取一个足够大的结果集，按发布时间降序（减少排序工作量）
         // 获取 page*size + buffer 的数据，以支持重排后获取正确的分页结果
         int fetchSize = Math.max(size * page + 100, 500); // 至少获取 500 条或 page*size+100
 
-        LambdaQueryWrapper<TechReport> wrapper = new LambdaQueryWrapper<TechReport>()
-                .eq(TechReport::getStatus, "PUBLISHED")
+    String targetStatus = (status == null || status.isBlank()) ? "PUBLISHED" : status;
+
+    LambdaQueryWrapper<TechReport> wrapper = new LambdaQueryWrapper<TechReport>()
+        .eq(TechReport::getStatus, targetStatus)
                 .eq(categoryId != null, TechReport::getCategoryId, categoryId)
                 .orderByDesc(TechReport::getPublishedAt);
 
@@ -192,6 +241,208 @@ public class TrackerService {
                 new LambdaQueryWrapper<TrackedTech>().orderByDesc(TrackedTech::getMentionCount));
     }
 
+    /**
+     * 首页知识图谱：按“类型(category) -> 技术 -> 报道(techIndex Top N)”组织。
+     *
+     * @param reportsPerTech 每个技术最多展示的报道数量（按 techIndex desc，再按 publishedAt desc）
+     * @param maxTechs       最多返回多少个技术（按 mentionCount desc），防止一次返回过大
+     */
+    public List<TrackerGraphResp.CategoryNode> buildGraph(int reportsPerTech, int maxTechs) {
+        int cappedReportsPerTech = Math.max(1, Math.min(reportsPerTech, 10));
+        int cappedMaxTechs = Math.max(1, Math.min(maxTechs, 200));
+
+        List<TrackedTech> techs = techMapper.selectList(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .eq(TrackedTech::getStatus, "ACTIVE")
+                        .orderByDesc(TrackedTech::getMentionCount)
+                        .last("LIMIT " + cappedMaxTechs)
+        );
+
+        // category -> node（保持插入顺序，便于前端稳定渲染）
+        Map<String, TrackerGraphResp.CategoryNode> categoryMap = new LinkedHashMap<>();
+
+        for (TrackedTech tech : techs) {
+            String rawCategory = tech.getCategory();
+            String category = (rawCategory == null || rawCategory.isBlank()) ? "未分类" : rawCategory.trim();
+            if (category.isBlank()) category = "未分类";
+            TrackerGraphResp.CategoryNode catNode = categoryMap.computeIfAbsent(category, k -> {
+                TrackerGraphResp.CategoryNode n = new TrackerGraphResp.CategoryNode();
+                n.setCategory(k);
+                return n;
+            });
+
+            TrackerGraphResp.TechNode techNode = new TrackerGraphResp.TechNode();
+            techNode.setTechId(tech.getId());
+            techNode.setTechName(tech.getName());
+            techNode.setTrackingMode(tech.getTrackingMode());
+            techNode.setLastKnownVersion(tech.getLastKnownVersion());
+
+            // 每个技术取 techIndex 最高的前 N 篇报道（同分按发布时间倒序）
+            List<TechReport> reports = reportMapper.selectList(
+                    new LambdaQueryWrapper<TechReport>()
+                            .eq(TechReport::getStatus, "PUBLISHED")
+                            .eq(TechReport::getTrackedTechId, tech.getId())
+                            .orderByDesc(TechReport::getTechIndex)
+                            .orderByDesc(TechReport::getPublishedAt)
+                            .last("LIMIT " + cappedReportsPerTech)
+            );
+            techNode.setReports(reports);
+
+            catNode.getTechs().add(techNode);
+        }
+
+        return new ArrayList<>(categoryMap.values());
+    }
+
+    /**
+     * 语义网络（实体-关系）版知识图谱：nodes + edges。
+     *
+     * A 阶段：Category -> Tech -> Report
+     * B 阶段（轻量增强）：Tech <-> Tech 共现边（当 Report 标题/内容同时提到多个 Tech 名称时）
+     */
+    public TrackerNetworkResp buildNetwork(int reportsPerTech, int maxTechs, String status, boolean includeTechCooccurrence) {
+        int cappedReportsPerTech = Math.max(1, Math.min(reportsPerTech, 10));
+        int cappedMaxTechs = Math.max(1, Math.min(maxTechs, 200));
+        String targetStatus = (status == null || status.isBlank()) ? "PUBLISHED" : status;
+
+        List<TrackedTech> techs = techMapper.selectList(
+                new LambdaQueryWrapper<TrackedTech>()
+                        .eq(TrackedTech::getStatus, "ACTIVE")
+                        .orderByDesc(TrackedTech::getMentionCount)
+                        .last("LIMIT " + cappedMaxTechs)
+        );
+
+        TrackerNetworkResp resp = new TrackerNetworkResp();
+        Map<String, TrackerNetworkResp.Node> nodeMap = new LinkedHashMap<>();
+        Set<String> edgeIds = new HashSet<>();
+
+        // quick lookup：techName -> techId（用于共现识别）
+        Map<String, Long> techNameToId = new HashMap<>();
+        for (TrackedTech t : techs) {
+            if (t.getName() != null && !t.getName().isBlank()) techNameToId.put(t.getName(), t.getId());
+        }
+
+        for (TrackedTech tech : techs) {
+            String rawCategory = tech.getCategory();
+            String category = (rawCategory == null || rawCategory.isBlank()) ? "未分类" : rawCategory.trim();
+            if (category.isBlank()) category = "未分类";
+
+            // category node
+            String catId = categoryNodeId(category);
+            String finalCategory = category;
+            nodeMap.computeIfAbsent(catId, id -> {
+                TrackerNetworkResp.Node n = new TrackerNetworkResp.Node();
+                n.setId(id);
+                n.setType("CATEGORY");
+                n.setLabel(finalCategory);
+                return n;
+            });
+
+            // tech node
+            String tId = techNodeId(tech.getId());
+            String finalCategory1 = category;
+            nodeMap.computeIfAbsent(tId, id -> {
+                TrackerNetworkResp.Node n = new TrackerNetworkResp.Node();
+                n.setId(id);
+                n.setType("TECH");
+                n.setLabel(tech.getName());
+                putIfNotNull(n.getProps(), "techId", tech.getId());
+                putIfNotNull(n.getProps(), "category", finalCategory1);
+                // debug: 如果你看到前端全部聚到“平台”，可以临时对比 rawCategory 是否带了不可见字符
+                putIfNotNull(n.getProps(), "categoryRaw", rawCategory);
+                putIfNotNull(n.getProps(), "trackingMode", tech.getTrackingMode());
+                putIfNotNull(n.getProps(), "lastKnownVersion", tech.getLastKnownVersion());
+                putIfNotNull(n.getProps(), "mentionCount", tech.getMentionCount());
+                return n;
+            });
+
+            // edge: category -> tech
+            String e1 = "e:HAS_TECH:" + catId + "->" + tId;
+            if (edgeIds.add(e1)) {
+                TrackerNetworkResp.Edge edge = new TrackerNetworkResp.Edge();
+                edge.setId(e1);
+                edge.setSource(catId);
+                edge.setTarget(tId);
+                edge.setType("HAS_TECH");
+                edge.setWeight(1.0);
+                resp.getEdges().add(edge);
+            }
+
+            // reports for tech
+            List<TechReport> reports = reportMapper.selectList(
+                    new LambdaQueryWrapper<TechReport>()
+                            .eq(TechReport::getStatus, targetStatus)
+                            .eq(TechReport::getTrackedTechId, tech.getId())
+                            .orderByDesc(TechReport::getTechIndex)
+                            .orderByDesc(TechReport::getPublishedAt)
+                            .last("LIMIT " + cappedReportsPerTech)
+            );
+
+            for (TechReport r : reports) {
+                String rId = reportNodeId(r.getId());
+                nodeMap.computeIfAbsent(rId, id -> {
+                    TrackerNetworkResp.Node n = new TrackerNetworkResp.Node();
+                    n.setId(id);
+                    n.setType("REPORT");
+                    n.setLabel(r.getTitle());
+                    putIfNotNull(n.getProps(), "reportId", r.getId());
+                    putIfNotNull(n.getProps(), "techId", r.getTrackedTechId());
+                    putIfNotNull(n.getProps(), "techIndex", r.getTechIndex());
+                    putIfNotNull(n.getProps(), "publishedAt", r.getPublishedAt());
+                    putIfNotNull(n.getProps(), "newVersion", r.getNewVersion());
+                    putIfNotNull(n.getProps(), "status", r.getStatus());
+                    return n;
+                });
+
+                // edge: tech -> report
+                String e2 = "e:HAS_REPORT:" + tId + "->" + rId;
+                if (edgeIds.add(e2)) {
+                    TrackerNetworkResp.Edge edge = new TrackerNetworkResp.Edge();
+                    edge.setId(e2);
+                    edge.setSource(tId);
+                    edge.setTarget(rId);
+                    edge.setType("HAS_REPORT");
+                    edge.setWeight(r.getTechIndex() != null ? Math.max(1.0, r.getTechIndex() / 100.0) : 1.0);
+                    resp.getEdges().add(edge);
+                }
+
+                // B：tech co-occurrence（轻量：扫标题/内容包含 techName）
+                if (includeTechCooccurrence) {
+                    String hay = ((r.getTitle() == null ? "" : r.getTitle()) + "\n" + (r.getContent() == null ? "" : r.getContent()));
+                    List<Long> mentionedTechIds = new ArrayList<>();
+                    for (Map.Entry<String, Long> entry : techNameToId.entrySet()) {
+                        String name = entry.getKey();
+                        if (name != null && name.length() >= 2 && hay.contains(name)) {
+                            mentionedTechIds.add(entry.getValue());
+                        }
+                    }
+                    for (int i = 0; i < mentionedTechIds.size(); i++) {
+                        for (int j = i + 1; j < mentionedTechIds.size(); j++) {
+                            String a = techNodeId(mentionedTechIds.get(i));
+                            String b = techNodeId(mentionedTechIds.get(j));
+                            if (a.equals(b)) continue;
+                            String k = (a.compareTo(b) <= 0) ? (a + "<->" + b) : (b + "<->" + a);
+                            String e3 = "e:CO_OCCUR:" + k;
+                            if (edgeIds.add(e3)) {
+                                TrackerNetworkResp.Edge edge = new TrackerNetworkResp.Edge();
+                                edge.setId(e3);
+                                edge.setSource(a);
+                                edge.setTarget(b);
+                                edge.setType("CO_OCCUR");
+                                edge.setWeight(1.0);
+                                edge.getProps().put("evidenceReportId", r.getId());
+                                resp.getEdges().add(edge);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        resp.getNodes().addAll(nodeMap.values());
+        return resp;
+    }
+
     public TrackedTech addTrackedTech(TrackedTech tech) {
         tech.setStatus("ACTIVE");
         tech.setMentionCount(0);
@@ -266,36 +517,41 @@ public class TrackerService {
                     + ", title=" + writeResult.getTitle()
                     + ", duration=" + writerDuration + "ms");
 
+        // P0: 草稿先落库（避免 Reviewer/LLM 超时导致“生成了但页面看不到”的体验）
+        TechReport draft = new TechReport();
+        draft.setTrackedTechId(tech.getId());
+        draft.setTitle(writeResult.getTitle());
+        draft.setContent(writeResult.getContent());
+        draft.setNewVersion(searchResult.getDetectedVersion());
+        draft.setChangeSummary(
+            searchResult.getRawInfoSummary() != null
+                ? searchResult.getRawInfoSummary().substring(0,
+                Math.min(500, searchResult.getRawInfoSummary().length()))
+                : "");
+        draft.setSourceUrls(buildSourceUrlsJson(searchResult));
+        draft.setStatus("DRAFT");
+        reportMapper.insert(draft);
+        traceLogger.trace(traceCtx, "DRAFT_SAVED", "draftReportId=" + draft.getId());
+
             // Stage 3: ReviewerAgent — 审核 + 评分 + 发布决策
             long reviewStart = System.currentTimeMillis();
             ReviewerAgent.ReviewResult review = reviewerAgent.review(tech, writeResult.getContent(), searchResult, traceCtx);
             int reviewDuration = (int)(System.currentTimeMillis() - reviewStart);
 
             if (review.isApproved()) {
-                // 构建并发布报道
-                TechReport report = new TechReport();
-                report.setTrackedTechId(tech.getId());
-                // P2-N: 使用 WriterAgent 生成的 AI 标题，而非机械拼接
-                report.setTitle(writeResult.getTitle());
-                report.setContent(review.getRevisedContent());
-                report.setNewVersion(searchResult.getDetectedVersion());
-                report.setChangeSummary(
-                        searchResult.getRawInfoSummary() != null
-                                ? searchResult.getRawInfoSummary().substring(0,
-                                    Math.min(500, searchResult.getRawInfoSummary().length()))
-                                : "");
-                report.setSourceUrls(buildSourceUrlsJson(searchResult));
-                report.setStatus("PUBLISHED");
-                report.setTechIndex(review.getTechIndex());
-                report.setPublishedAt(LocalDateTime.now());
-                reportMapper.insert(report);
+        // 发布：更新同一条草稿记录，而不是新插入
+        draft.setContent(review.getRevisedContent());
+        draft.setStatus("PUBLISHED");
+        draft.setTechIndex(review.getTechIndex());
+        draft.setPublishedAt(LocalDateTime.now());
+        reportMapper.updateById(draft);
 
-                // 同步到知识库
-                syncToKnowledge(report, tech, traceCtx);
+        // 仅在发布后同步到知识库，避免把未审核内容写入知识库
+        syncToKnowledge(draft, tech, traceCtx);
 
                 traceLogger.trace(traceCtx, "REVIEWER_AGENT", "Report approved: techIndex=" + review.getTechIndex()
                         + ", published=true, duration=" + reviewDuration + "ms");
-                traceLogger.trace(traceCtx, "TRACKER_SUCCESS", "Report published: " + report.getId());
+        traceLogger.trace(traceCtx, "TRACKER_SUCCESS", "Report published: " + draft.getId());
             } else {
                 traceLogger.trace(traceCtx, "REVIEWER_AGENT", "Report rejected: " + review.getRejectionReason()
                         + ", duration=" + reviewDuration + "ms");

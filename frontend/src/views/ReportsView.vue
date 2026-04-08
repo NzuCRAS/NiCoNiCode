@@ -6,12 +6,12 @@
     <div v-else class="newspaper">
       <!-- 报头 -->
       <div class="masthead">
-        <h1 class="masthead-title">NICONICODE</h1>
+  <h1 class="masthead-title">NICODE</h1>
         <div class="masthead-sub">技术追踪 · 深度分析</div>
         <div class="masthead-meta">
           <span>第 {{ issueNumber }} 期</span>
           <span>{{ todayStr }}</span>
-          <span>niconicode.com</span>
+          <span>nicode.com</span>
         </div>
       </div>
 
@@ -131,7 +131,7 @@
 
       <!-- 报脚 -->
       <div class="np-footer">
-        <span>&copy; NiCoNiCode · 技术追踪平台</span>
+  <span>&copy; Nicode · 技术追踪平台</span>
         <span>每小时自动更新 · AI 驱动</span>
       </div>
     </div>
@@ -209,11 +209,15 @@ function calcCompositeScore(report: any): number {
 
 async function fetchReports() {
   try {
-    const res: any = await api.get('/tracker/reports/by-score', { params: { page: 1, size: 15 } })
+    const url = new URL(window.location.href)
+    const status = url.searchParams.get('status') || undefined
+    const res: any = await api.get('/tracker/reports/by-score', { params: { page: 1, size: 15, status } })
     reports.value = res.data?.records || []
   } catch {
     try {
-      const res: any = await api.get('/tracker/reports', { params: { page: 1, size: 15 } })
+      const url = new URL(window.location.href)
+      const status = url.searchParams.get('status') || undefined
+      const res: any = await api.get('/tracker/reports', { params: { page: 1, size: 15, status } })
       reports.value = res.data?.records || []
     } catch { /* ignore */ }
   }

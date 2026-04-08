@@ -4,7 +4,7 @@
       <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div class="flex justify-between h-14 items-center">
           <div class="flex items-center space-x-8">
-            <router-link to="/" class="text-xl font-bold text-primary">NiCoNiCode</router-link>
+            <router-link to="/" class="text-xl font-bold text-primary">Nicode</router-link>
             <div class="hidden sm:flex space-x-6">
               <router-link to="/" class="nav-link">首页</router-link>
               <router-link to="/chat" class="nav-link">AI 对话</router-link>
@@ -103,7 +103,7 @@
       <router-view />
     </main>
     <footer class="border-t py-6 text-center text-sm text-gray-400" :style="navStyle">
-      NiCoNiCode &copy; 2026 - AI 驱动的技术问答与追踪平台
+      Nicode &copy; 2026 - AI 驱动的技术问答与追踪平台
     </footer>
   </div>
 </template>
