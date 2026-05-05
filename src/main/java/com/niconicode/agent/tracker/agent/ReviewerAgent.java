@@ -41,6 +41,20 @@ public class ReviewerAgent {
                                 TraceLogger.TraceContext traceCtx) {
         ReviewResult result = new ReviewResult();
 
+        // P0-K: 稀缺数据(OFFICIAL_URL)直接拒绝发布，保留为草稿。
+        // 这种情况下报道内容由 WriterAgent 生成的占位 stub，没有实质技术分析，
+        // 不应该自动公开。等用户改善 changelogUrl 配置后再生成正式报道。
+        if (isThinData(searchResult)) {
+            result.setApproved(false);
+            result.setRevisedContent(reportContent);
+            result.setTechIndex(0);
+            result.setRejectionReason("仅检测到版本号变化，无具体变更内容（mode="
+                    + searchResult.getUpdateMode() + "），保留为草稿");
+            traceLogger.trace(traceCtx, "REVIEWER_DECISION",
+                    "rejected: thin data, mode=" + searchResult.getUpdateMode());
+            return result;
+        }
+
         // Step 1: 内容审核
         long reviewStart = System.currentTimeMillis();
         String contentReview = reviewContent(reportContent);
@@ -75,6 +89,22 @@ public class ReviewerAgent {
         }
 
         return result;
+    }
+
+    /**
+     * P0-K: 与 WriterAgent.isThinData 保持一致 - 判断 search result 是否为稀缺数据。
+     * 稀缺数据的报道由 WriterAgent 生成的占位 stub，不应自动发布。
+     */
+    private boolean isThinData(SearchAgent.SearchResult sr) {
+        if (sr == null) return true;
+        if ("OFFICIAL_URL".equals(sr.getUpdateMode())) return true;
+        boolean hasReleaseBody = sr.getReleaseInfo() != null
+                && sr.getReleaseInfo().getBody() != null
+                && !sr.getReleaseInfo().getBody().isBlank();
+        boolean hasCommits = sr.getRecentCommits() != null && !sr.getRecentCommits().isEmpty();
+        boolean hasChangelog = sr.getChangelogEntries() != null && !sr.getChangelogEntries().isEmpty();
+        boolean hasRssContent = sr.getRssContent() != null && !sr.getRssContent().isBlank();
+        return !hasReleaseBody && !hasCommits && !hasChangelog && !hasRssContent;
     }
 
     /**

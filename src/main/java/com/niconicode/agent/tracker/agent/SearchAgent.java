@@ -4,6 +4,7 @@ import com.niconicode.agent.tracker.dto.GitHubCommitInfo;
 import com.niconicode.agent.tracker.dto.GitHubReleaseInfo;
 import com.niconicode.agent.tracker.entity.TrackedTech;
 import com.niconicode.agent.tracker.service.GitHubMonitorService;
+import com.niconicode.agent.tracker.service.OfficialSiteCrawler;
 import com.niconicode.agent.tracker.service.RssService;
 import com.niconicode.agent.chat.service.TraceLogger;
 import com.rometools.rome.feed.synd.SyndEntry;
@@ -11,6 +12,8 @@ import dev.langchain4j.model.chat.ChatLanguageModel;
 import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
@@ -36,6 +39,7 @@ public class SearchAgent {
 
     private final GitHubMonitorService githubMonitor;
     private final RssService rssService;
+    private final OfficialSiteCrawler officialCrawler;
     private final ChatLanguageModel chatModel;
     private final TraceLogger traceLogger;
 
@@ -74,6 +78,10 @@ public class SearchAgent {
         private String rssContent;
         /** P0-I: 官方 URL 页面搜集到的原始内容 */
         private String officialUrlContent;
+        /** 官网更新日志页提取的条目列表 */
+        private List<OfficialSiteCrawler.ChangelogEntry> changelogEntries = new ArrayList<>();
+        /** 官网更新日志页原始内容摘要 */
+        private String officialChangelogContent;
     }
 
     public SearchResult search(TrackedTech tech, TraceLogger.TraceContext traceCtx) {
@@ -82,8 +90,9 @@ public class SearchAgent {
         boolean hasGithub = tech.getGithubRepo() != null && !tech.getGithubRepo().isBlank();
         boolean hasRss = tech.getRssUrl() != null && !tech.getRssUrl().isBlank();
         boolean hasOfficialUrl = tech.getOfficialUrl() != null && !tech.getOfficialUrl().isBlank();
+        boolean hasChangelog = tech.getChangelogUrl() != null && !tech.getChangelogUrl().isBlank();
 
-        if (!hasGithub && !hasRss && !hasOfficialUrl) {
+        if (!hasGithub && !hasRss && !hasOfficialUrl && !hasChangelog) {
             traceLogger.trace(traceCtx, "SEARCH_SKIP", "no data sources configured");
             result.setHasUpdate(false);
             return result;
@@ -91,12 +100,13 @@ public class SearchAgent {
 
         String mode = tech.getTrackingMode() != null ? tech.getTrackingMode() : "RELEASE";
         traceLogger.trace(traceCtx, "SEARCH_MODE", "mode=" + mode
-                + " github=" + hasGithub + " rss=" + hasRss + " official=" + hasOfficialUrl);
+                + " github=" + hasGithub + " rss=" + hasRss
+                + " official=" + hasOfficialUrl + " changelog=" + hasChangelog);
 
         if (hasGithub) {
             // 追踪模式升级：无论模式如何，都尽量把 GitHub 的多个维度一起采集。
             // - RELEASE/TAG：以版本更新为主，但补充 commit 与 PR/issue 活跃度
-            // - COMMIT：以开发动态为主，但也补充 release/tag 作为“里程碑”
+            // - COMMIT：以开发动态为主，但也补充 release/tag 作为"里程碑"
             searchGitHubAggregate(tech, result, traceCtx);
 
             // 兼容：如果用户显式指定 mode=TAG，且 release 未命中，可把 TAG 信息当作 detectedVersion
@@ -106,12 +116,27 @@ public class SearchAgent {
             }
         }
 
-        // GitHub 未找到更新（或无 GitHub），尝试 RSS 源
+        // GitHub 未找到更新（或无 GitHub），优先尝试官网更新日志页
+        // 优先级：changelogUrl(显式) > officialUrl 试爬(用户常错填) > rssUrl > officialUrl 兜底版本扫描
+        if (!result.isHasUpdate() && hasChangelog) {
+            // changelogUrl 是显式标注，允许用 title 兜底当作版本
+            searchOfficialChangelog(tech, tech.getChangelogUrl(), false, result, traceCtx);
+        }
+
+        // P0-J: 用户经常把更新日志 URL 填到 officialUrl 字段（而不是 changelogUrl），
+        // 此时也尝试用爬虫解析。但用严格模式：要求最新条目能提取出真实版本号，
+        // 否则认为这是首页/导航页而不是 changelog，避免假阳性。
+        if (!result.isHasUpdate() && hasOfficialUrl
+                && !tech.getOfficialUrl().equalsIgnoreCase(tech.getChangelogUrl())) {
+            searchOfficialChangelog(tech, tech.getOfficialUrl(), true, result, traceCtx);
+        }
+
+        // 更新日志页也未找到，尝试 RSS 源
         if (!result.isHasUpdate() && hasRss) {
             searchRssSource(tech, result, traceCtx);
         }
 
-        // RSS 也未找到（或无 RSS），尝试官方页面
+        // RSS 也未找到（或无 RSS），尝试官方首页（仅做版本号扫描，作为最后兜底）
         if (!result.isHasUpdate() && hasOfficialUrl) {
             searchOfficialUrl(tech, result, traceCtx);
         }
@@ -135,7 +160,7 @@ public class SearchAgent {
      * 更新判定规则：
      * 1) 若找到 new release/tag/commit 任一，则 hasUpdate=true。
      * 2) 若版本无变化，但 PR/issue 活跃度很高（merged PR 或 closed issue 非零），
-     *    不直接认为是“需要发布报道”的更新（避免噪声），只作为 rawInfoSummary 的补充。
+     *    不直接认为是"需要发布报道"的更新（避免噪声），只作为 rawInfoSummary 的补充。
      */
     private void searchGitHubAggregate(TrackedTech tech, SearchResult result, TraceLogger.TraceContext traceCtx) {
         String mode = tech.getTrackingMode() != null ? tech.getTrackingMode() : "RELEASE";
@@ -162,7 +187,7 @@ public class SearchAgent {
         }
 
         // 2) tag 维度：当 mode=TAG 或 release 没命中时，都补充一次 tag 检查
-        // 目的：在无 release 的仓库里，tag 常常是“等价 release”。
+        // 目的：在无 release 的仓库里，tag 常常是"等价 release"。
         if (!result.isHasUpdate() || "TAG".equals(mode)) {
             String newTag = githubMonitor.checkLatestTag(
                     tech.getGithubRepo(), tech.getLastKnownVersion());
@@ -193,7 +218,7 @@ public class SearchAgent {
                 result.setRecentCommits(commits);
                 traceLogger.trace(traceCtx, "SEARCH_GITHUB_COMMITS", "count=" + commits.size());
 
-                // 若模式是 COMMIT，则用“是否有新 commit sha”作为更新判定
+                // 若模式是 COMMIT，则用"是否有新 commit sha"作为更新判定
                 if ("COMMIT".equals(mode) && tech.getLastKnownCommitSha() != null) {
                     String latestSha = commits.get(0).getSha();
                     if (latestSha != null && !latestSha.isBlank()
@@ -315,6 +340,110 @@ public class SearchAgent {
     }
 
     /**
+     * 从官网更新日志页搜集更新信息。
+     * 使用 OfficialSiteCrawler 抓取并解析结构化更新条目，
+     * 与 lastKnownVersion 对比判断是否为新版本。
+     *
+     * <p>适用于大模型官网（如 DeepSeek API 更新页）等无 GitHub Release 的场景。</p>
+     *
+     * @param url       要爬取的 URL（changelogUrl 或被当作 changelog 尝试的 officialUrl）
+     * @param strict    严格模式：true 时要求最新条目必须能提取出真实版本号（不允许用 title 兜底）。
+     *                  当 url 来自 officialUrl 时建议设为 true，避免把首页/导航页当成更新日志。
+     */
+    private void searchOfficialChangelog(TrackedTech tech, String url, boolean strict,
+                                         SearchResult result, TraceLogger.TraceContext traceCtx) {
+        if (url == null || url.isBlank()) return;
+
+        traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_START", "url=" + url + " strict=" + strict);
+
+        try {
+            List<OfficialSiteCrawler.ChangelogEntry> entries = officialCrawler.crawlChangelog(url);
+
+            if (entries.isEmpty()) {
+                traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_RESULT", "no entries found");
+                return;
+            }
+
+            // 取最新条目判断是否为新版本
+            OfficialSiteCrawler.ChangelogEntry latest = entries.get(0);
+            String detectedVersion;
+            if (strict) {
+                // 严格模式：只接受"标题中含版本号"的条目，避免把首页随机内容当作 changelog
+                detectedVersion = officialCrawler.extractVersion(latest.getTitle());
+                if (detectedVersion == null || detectedVersion.isBlank()) {
+                    traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_RESULT",
+                            "strict mode: no version in latest entry title='"
+                                    + latest.getTitle() + "', abort (url=" + url + ")");
+                    return;
+                }
+            } else {
+                // 非严格：允许从 title+content 一起提取，提取不到时用 title 兜底
+                detectedVersion = latest.getVersion();
+                if (detectedVersion == null || detectedVersion.isBlank()) {
+                    detectedVersion = latest.getTitle();
+                }
+            }
+
+            // 判断是否是新版本
+            boolean isNew = true;
+            if (detectedVersion != null && tech.getLastKnownVersion() != null) {
+                isNew = !detectedVersion.equalsIgnoreCase(tech.getLastKnownVersion())
+                        && !tech.getLastKnownVersion().contains(detectedVersion)
+                        && !detectedVersion.contains(tech.getLastKnownVersion());
+            }
+
+            if (!isNew) {
+                traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_RESULT",
+                        "version=" + detectedVersion + " already known");
+                return;
+            }
+
+            result.setHasUpdate(true);
+            result.setUpdateMode("OFFICIAL_CHANGELOG");
+            result.setDetectedVersion(detectedVersion);
+            result.setChangelogEntries(entries);
+
+            // 构建原始内容摘要
+            StringBuilder contentBuilder = new StringBuilder();
+            contentBuilder.append("[官网更新日志] ").append(latest.getTitle()).append("\n");
+            if (latest.getDate() != null) {
+                contentBuilder.append("发布日期: ").append(latest.getDate()).append("\n");
+            }
+            if (latest.getLink() != null) {
+                contentBuilder.append("链接: ").append(latest.getLink()).append("\n");
+                result.getSourceUrls().add(latest.getLink());
+            }
+            contentBuilder.append("\n内容摘要:\n").append(latest.getContent()).append("\n");
+
+            // 附加其他条目作为上下文
+            if (entries.size() > 1) {
+                contentBuilder.append("\n历史版本:\n");
+                for (int i = 1; i < Math.min(entries.size(), 5); i++) {
+                    OfficialSiteCrawler.ChangelogEntry e = entries.get(i);
+                    contentBuilder.append("- ").append(e.getTitle());
+                    if (e.getDate() != null) {
+                        contentBuilder.append(" (").append(e.getDate()).append(")");
+                    }
+                    contentBuilder.append("\n");
+                }
+            }
+
+            result.setOfficialChangelogContent(contentBuilder.toString());
+
+            // 始终将更新日志页本身也加入来源
+            result.getSourceUrls().add(url);
+
+            traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_RESULT",
+                    "found version=" + detectedVersion + " entries=" + entries.size()
+                            + " latestTitle=" + latest.getTitle());
+
+        } catch (Exception e) {
+            traceLogger.trace(traceCtx, "SEARCH_CHANGELOG_RESULT", "error: " + e.getMessage());
+            log.debug("Failed to crawl changelog for {}: {}", tech.getName(), e.getMessage());
+        }
+    }
+
+    /**
      * P0-I: 从 RSS 源搜集更新信息。
      * 解析最新几条 Entry 的标题/描述，尝试提取版本号。
      * 若无法确认版本，则将最新 Entry 内容作为更新摘要并标记 hasUpdate=true。
@@ -393,9 +522,13 @@ public class SearchAgent {
     }
 
     /**
-     * P0-I: 从官方页面 URL 搜集更新信息。
-     * 发送 HTTP GET 请求，从响应 body（通常是 HTML）的 <title> 和前 2KB 内容
-     * 中用正则提取版本号。这是最后的降级手段，超时设置较短。
+     * P0-I: 从官方页面 URL 搜集更新信息（最后的兜底）。
+     * 用 JSoup 解析 HTML，剥掉 head/meta/script/style/nav 等非内容节点，
+     * 从可见正文中用版本正则匹配。
+     *
+     * <p>修复：以前只扫前 4KB 原始 HTML，会被 Docusaurus 等生成器的
+     * <code>&lt;meta name="generator" content="Docusaurus v3.1.0"&gt;</code> 误识别为产品版本。
+     * 现在剥掉 head/meta 后再匹配，从根本上避免这类假阳性。</p>
      */
     private void searchOfficialUrl(TrackedTech tech, SearchResult result, TraceLogger.TraceContext traceCtx) {
         String officialUrl = tech.getOfficialUrl();
@@ -406,7 +539,8 @@ public class SearchAgent {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(officialUrl))
                     .timeout(HTTP_TIMEOUT)
-                    .header("User-Agent", "NiCoNiCode-Tracker/1.0 (tech tracker bot)")
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                     .header("Accept", "text/html,application/xhtml+xml,text/plain")
                     .GET()
                     .build();
@@ -420,25 +554,29 @@ public class SearchAgent {
             }
 
             String body = response.body();
-            // 只扫描前 4KB，避免处理完整 HTML 带来的开销
-            String snippet = body.length() > 4096 ? body.substring(0, 4096) : body;
-
-            // 提取 <title> 标签内容（常含版本号）
-            String pageTitle = "";
-            Matcher titleMatcher = Pattern.compile("<title[^>]*>([^<]+)</title>",
-                    Pattern.CASE_INSENSITIVE).matcher(snippet);
-            if (titleMatcher.find()) {
-                pageTitle = titleMatcher.group(1).trim();
+            if (body == null || body.isBlank()) {
+                traceLogger.trace(traceCtx, "SEARCH_OFFICIAL_RESULT", "empty body");
+                return;
             }
 
-            // 在 title + snippet 中搜索版本
-            Matcher vm = VERSION_PATTERN.matcher(pageTitle + " " + snippet);
-            String detectedVersion = null;
-            if (vm.find()) {
-                detectedVersion = vm.group(1);
+            // 用 JSoup 解析并剥掉非内容节点
+            Document doc = Jsoup.parse(body, officialUrl);
+            // 抽取 <title>（在剥 head 之前）
+            String pageTitle = doc.title().trim();
+            // 剥掉所有"非可见内容"节点：head/script/style/meta/link/noscript/nav/header/footer/sidebar
+            doc.select("head, script, style, noscript, link, meta, nav, header, footer, "
+                    + ".navbar, .nav, .sidebar, .menu, .breadcrumbs, .toc, .footer").remove();
+            String visibleText = doc.body().text();
+            // 限制扫描范围，避免极长页面
+            if (visibleText.length() > 16384) {
+                visibleText = visibleText.substring(0, 16384);
             }
 
-            // 判断是否为新版本
+            // 在 title + 可见文本中搜索版本（pageTitle 来自 head 已剥离前的提取，仍可用）
+            // 用 OfficialSiteCrawler.extractVersion: 优先匹配模型名(DeepSeek-V3 等)，再退到通用 v1.2.3 模式
+            String haystack = pageTitle + " " + visibleText;
+            String detectedVersion = officialCrawler.extractVersion(haystack);
+
             if (detectedVersion == null) {
                 traceLogger.trace(traceCtx, "SEARCH_OFFICIAL_RESULT", "no version pattern found");
                 return;
@@ -513,6 +651,11 @@ public class SearchAgent {
             raw.append(result.getOfficialUrlContent()).append("\n");
         }
 
+        // 官网更新日志页内容
+        if (result.getOfficialChangelogContent() != null && !result.getOfficialChangelogContent().isBlank()) {
+            raw.append(result.getOfficialChangelogContent()).append("\n");
+        }
+
         try {
             // 避免 String.format / formatted：原始内容可能包含 %，会触发 Formatter 异常
             String prompt = "请用 3-5 句话简洁总结以下技术更新的原始信息，提取核心要点:\n" + raw;
@@ -545,6 +688,21 @@ public class SearchAgent {
         }
         if ("OFFICIAL_URL".equals(result.getUpdateMode())) {
             // 官方页面只能提取版本号，内容较少，定为 LOW
+            return DataSufficiency.LOW;
+        }
+        // 官网更新日志页：如果能提取到内容丰富的条目，可评为 HIGH 或 MEDIUM
+        if ("OFFICIAL_CHANGELOG".equals(result.getUpdateMode())) {
+            if (result.getChangelogEntries() != null && !result.getChangelogEntries().isEmpty()) {
+                OfficialSiteCrawler.ChangelogEntry first = result.getChangelogEntries().get(0);
+                // 内容足够丰富 & 有版本号 → HIGH；有版本号但内容一般 → MEDIUM；否则 LOW
+                if (first.getContent() != null && first.getContent().length() > 300
+                        && first.getVersion() != null) {
+                    return DataSufficiency.HIGH;
+                }
+                if (first.getVersion() != null || first.getContent().length() > 100) {
+                    return DataSufficiency.MEDIUM;
+                }
+            }
             return DataSufficiency.LOW;
         }
         return DataSufficiency.LOW;

@@ -300,3 +300,11 @@ Slow Path: LLM 重写 + DAG 拆分（200-500ms）
 	如果同一会话中用户问了相似问题，可以从会话记忆中直接返回之前检索过的内容，避免重复检索。会话记忆中的历史 RAG 结果可以缓存
 - 记忆驱动的检索时机
 	根据用户级记忆（如用户对某领域感兴趣），在开始 ReAct 前主动预检索该领域的最新信息，作为候选上下文，减少后续检索次数
+
+---------------
+
+❯ 1.我们的意图识别和重写好像有点不准确，比如：                                                                                                                                                   
+  2026-03-25 14:40:44.561 [ForkJoinPool.commonPool-worker-1] INFO  c.n.agent.chat.service.TraceLogger - [TRACE:dcb8d690] [QUERY_REWRITE] original=你确定你说的那些彩蛋是真实存在的吗 ->
+  rewritten=你能详细说明一下Kubernetes v1.35.3的更新内容吗，特别是那些有趣的彩蛋信息？, strategy=LLM, subTasks=2, duration=1530ms                                                                
+  2.我们现在需要处理我们所有agent的幻觉问题，我个人暂时想到的一些技术方案是：  
+   a.在我们识别意图之后，   

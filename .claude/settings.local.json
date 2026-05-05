@@ -83,7 +83,27 @@
       "Bash(xargs grep:*)",
       "Bash(grep -r \"workflow\\\\|StateMachine\\\\|Graph\\\\|Pipeline\" /c/Code/JAVA/niconicode/src/main/java --include=*.java)",
       "Bash(JAVA_TOOL_OPTIONS=\"-Duser.language=en -Duser.country=US\" mvn compile -q)",
-      "Bash(echo \"EXIT:$?\")"
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(cmd *)",
+      "Bash(mvn spring-boot:run)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://api-docs.deepseek.com/zh-cn/updates\")",
+      "Bash(curl -s -A \"Mozilla/5.0\" \"https://api-docs.deepseek.com/zh-cn/updates\" -o /tmp/deepseek-updates.html)",
+      "Read(//tmp/**)",
+      "Bash(grep -aoE '<\\(h[1-6]|p|ul|ol|hr\\)[^>]*>[^<]{0,200}' /tmp/deepseek-updates.html)",
+      "Bash(grep -aoE '<meta[^>]*v3\\\\.1\\\\.0[^>]*>|Docusaurus.{0,30}v3\\\\.1\\\\.0')",
+      "Bash(mvn -q -DskipTests compile)",
+      "Bash(mvn -DskipTests compile)",
+      "Bash(mvn -DskipTests clean compile)",
+      "Bash(mvn -Dtest=OfficialSiteCrawlerDeepSeekTest test)",
+      "Bash(curl -s -L -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0.0.0 Safari/537.36\" \"https://platform.claude.com/docs/en/release-notes/overview\" -o /tmp/claude-release.html)",
+      "Bash(curl -s -L -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36 \\(KHTML, like Gecko\\) Chrome/120.0.0.0 Safari/537.36\" \"https://blog.google/innovation-and-ai/models-and-research/gemini-models/\" -o /tmp/gemini-blog.html)",
+      "Bash(grep -aoE '<h3[^>]*>[^<]{0,200}' /tmp/claude-release.html)",
+      "Bash(python *)",
+      "Bash(cygpath -m /tmp)",
+      "Bash(cp /tmp/claude-release.html src/test/resources/fixtures/claude-release.html)",
+      "Bash(cp /tmp/gemini-blog.html src/test/resources/fixtures/gemini-blog.html)",
+      "Bash(mvn test *)"
     ]
   }
 }

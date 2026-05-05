@@ -136,8 +136,11 @@ ALTER TABLE `tech_report` ADD COLUMN `tech_index` INT DEFAULT 0 COMMENT '技术�
 ALTER TABLE `knowledge_doc` ADD COLUMN `category_id` BIGINT DEFAULT NULL;
 
 -- tracked_tech 添加追踪模式和最新 commit SHA
-ALTER TABLE `tracked_tech` ADD COLUMN `tracking_mode` VARCHAR(20) DEFAULT 'RELEASE';
+ALTER TABLE `tracked_tech` ADD COLUMN `tracking_mode` VARCHAR(20) DEFAULT 'RELEASE' COMMENT 'RELEASE/TAG/COMMIT/OFFICIAL';
 ALTER TABLE `tracked_tech` ADD COLUMN `last_known_commit_sha` VARCHAR(40) NULL;
+
+-- tracked_tech 添加官网更新日志 URL（用于非 GitHub 发布的技术，如大模型）
+ALTER TABLE `tracked_tech` ADD COLUMN `changelog_url` VARCHAR(512) NULL COMMENT '官网更新日志/公告页面 URL';
 
 -- chat_message 添加软删除字段
 ALTER TABLE `chat_message` ADD COLUMN `deleted_at` DATETIME DEFAULT NULL;

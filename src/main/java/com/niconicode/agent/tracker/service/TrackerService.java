@@ -462,6 +462,7 @@ public class TrackerService {
         if (tech.getCategory() != null) existing.setCategory(tech.getCategory());
         if (tech.getGithubRepo() != null) existing.setGithubRepo(tech.getGithubRepo());
         if (tech.getOfficialUrl() != null) existing.setOfficialUrl(tech.getOfficialUrl());
+        if (tech.getChangelogUrl() != null) existing.setChangelogUrl(tech.getChangelogUrl());
         if (tech.getRssUrl() != null) existing.setRssUrl(tech.getRssUrl());
         if (tech.getTrackingMode() != null) existing.setTrackingMode(tech.getTrackingMode());
         if (tech.getStatus() != null) existing.setStatus(tech.getStatus());
@@ -477,10 +478,11 @@ public class TrackerService {
         TrackedTech tech = techMapper.selectById(techId);
         if (tech == null || !"ACTIVE".equals(tech.getStatus())) return;
 
-        // P0-I fix: 不再要求必须有 githubRepo，SearchAgent 已支持 RSS/官方URL 作为数据源
+        // P0-I fix: 不再要求必须有 githubRepo，SearchAgent 已支持 RSS/官方URL/更新日志页 作为数据源
         boolean hasAnySource = (tech.getGithubRepo() != null && !tech.getGithubRepo().isBlank())
                 || (tech.getRssUrl() != null && !tech.getRssUrl().isBlank())
-                || (tech.getOfficialUrl() != null && !tech.getOfficialUrl().isBlank());
+                || (tech.getOfficialUrl() != null && !tech.getOfficialUrl().isBlank())
+                || (tech.getChangelogUrl() != null && !tech.getChangelogUrl().isBlank());
         if (!hasAnySource) return;
 
         // 初始化追踪上下文
@@ -509,16 +511,63 @@ public class TrackerService {
                     + " (" + searchResult.getUpdateMode() + "), sources=" + searchResult.getSourceUrls().size()
                     + ", duration=" + searchDuration + "ms");
 
-            // Stage 2: WriterAgent — 撰写高质量报道（P2-N: 返回 WriteResult，含 AI 生成标题）
-            long writerStart = System.currentTimeMillis();
-            WriterAgent.WriteResult writeResult = writerAgent.write(tech, searchResult, traceCtx);
-            int writerDuration = (int)(System.currentTimeMillis() - writerStart);
-            traceLogger.trace(traceCtx, "WRITER_AGENT", "Report generated, length=" + writeResult.getContent().length()
-                    + ", title=" + writeResult.getTitle()
-                    + ", duration=" + writerDuration + "ms");
+        // 幂等去重：同一个 tech + detectedVersion 不应反复生成草稿。
+        // - 若已存在 PUBLISHED：直接短路
+        // - 若已存在 DRAFT：复用草稿，直接进入 Reviewer（不再跑 Writer）
+        TechReport draft = null;
+        String detectedVersion = searchResult.getDetectedVersion();
+        if (detectedVersion != null && !detectedVersion.isBlank()
+            && ("RELEASE".equals(searchResult.getUpdateMode()) || "TAG".equals(searchResult.getUpdateMode())
+                || "OFFICIAL_CHANGELOG".equals(searchResult.getUpdateMode())
+                || "OFFICIAL_URL".equals(searchResult.getUpdateMode()))) {
+        TechReport publishedSameVersion = reportMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TechReport>()
+                .eq(TechReport::getTrackedTechId, tech.getId())
+                .eq(TechReport::getNewVersion, detectedVersion)
+                .eq(TechReport::getStatus, "PUBLISHED")
+                .last("LIMIT 1")
+        );
+        if (publishedSameVersion != null) {
+            traceLogger.trace(traceCtx, "TRACKER_IDEMPOTENT_SKIP",
+                "Already published for version=" + detectedVersion + ", reportId=" + publishedSameVersion.getId());
+            tech.setLastCheckedAt(LocalDateTime.now());
+            techMapper.updateById(tech);
+            traceLogger.endTrace(traceCtx);
+            return;
+        }
 
+        draft = reportMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TechReport>()
+                .eq(TechReport::getTrackedTechId, tech.getId())
+                .eq(TechReport::getNewVersion, detectedVersion)
+                .eq(TechReport::getStatus, "DRAFT")
+                .orderByDesc(TechReport::getCreatedAt)
+                .last("LIMIT 1")
+        );
+        if (draft != null) {
+            traceLogger.trace(traceCtx, "TRACKER_IDEMPOTENT_REUSE",
+                "Reuse existing draft for version=" + detectedVersion + ", draftReportId=" + draft.getId());
+        }
+        }
+
+            // Stage 2: WriterAgent — 撰写高质量报道（P2-N: 返回 WriteResult，含 AI 生成标题）
+        WriterAgent.WriteResult writeResult;
+        if (draft == null) {
+        long writerStart = System.currentTimeMillis();
+        writeResult = writerAgent.write(tech, searchResult, traceCtx);
+        int writerDuration = (int)(System.currentTimeMillis() - writerStart);
+        traceLogger.trace(traceCtx, "WRITER_AGENT", "Report generated, length=" + writeResult.getContent().length()
+            + ", title=" + writeResult.getTitle()
+            + ", duration=" + writerDuration + "ms");
+        } else {
+        // 复用草稿时，不再重复生成内容
+        writeResult = new WriterAgent.WriteResult(draft.getTitle(), draft.getContent());
+        traceLogger.trace(traceCtx, "WRITER_AGENT", "Skipped (reuse draft), draftReportId=" + draft.getId());
+        }
+
+        if (draft == null) {
         // P0: 草稿先落库（避免 Reviewer/LLM 超时导致“生成了但页面看不到”的体验）
-        TechReport draft = new TechReport();
+        draft = new TechReport();
         draft.setTrackedTechId(tech.getId());
         draft.setTitle(writeResult.getTitle());
         draft.setContent(writeResult.getContent());
@@ -532,6 +581,7 @@ public class TrackerService {
         draft.setStatus("DRAFT");
         reportMapper.insert(draft);
         traceLogger.trace(traceCtx, "DRAFT_SAVED", "draftReportId=" + draft.getId());
+        }
 
             // Stage 3: ReviewerAgent — 审核 + 评分 + 发布决策
             long reviewStart = System.currentTimeMillis();
@@ -607,7 +657,9 @@ public class TrackerService {
     private void updateTrackingState(TrackedTech tech, SearchAgent.SearchResult searchResult,
                                      TraceLogger.TraceContext traceCtx) {
         if ("RELEASE".equals(searchResult.getUpdateMode())
-                || "TAG".equals(searchResult.getUpdateMode())) {
+                || "TAG".equals(searchResult.getUpdateMode())
+                || "OFFICIAL_CHANGELOG".equals(searchResult.getUpdateMode())
+                || "OFFICIAL_URL".equals(searchResult.getUpdateMode())) {
             tech.setLastKnownVersion(searchResult.getDetectedVersion());
         }
         if ("TAG".equals(searchResult.getUpdateMode())

@@ -38,6 +38,16 @@ public class WriterAgent {
      */
     public WriteResult write(TrackedTech tech, SearchAgent.SearchResult searchResult,
                              TraceLogger.TraceContext traceCtx) {
+        // P0-K: 数据稀缺时跳过 AI 生成，避免幻觉
+        // OFFICIAL_URL 模式只有版本号 + URL，没有实质内容；让 AI 写完整报告会编内容。
+        if (isThinData(searchResult)) {
+            traceLogger.trace(traceCtx, "WRITER_THIN_DATA_BYPASS",
+                    "mode=" + searchResult.getUpdateMode()
+                    + ", sufficiency=" + searchResult.getDataSufficiency()
+                    + ", reason=no concrete content");
+            return buildStubReport(tech, searchResult);
+        }
+
         String prompt = buildPrompt(tech, searchResult);
         traceLogger.trace(traceCtx, "WRITER_PROMPT_BUILT", "contextLength=" + prompt.length());
 
@@ -65,6 +75,65 @@ public class WriterAgent {
             traceLogger.traceError(traceCtx, "WRITER_AI_CALL", e);
             throw new RuntimeException("报道撰写失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * 判断是否为"稀缺数据"：仅检测到版本号但无实质变更内容。
+     * 这种情况下应该跳过 AI 生成完整报告，避免幻觉。
+     *
+     * <p>稀缺数据的典型场景：</p>
+     * <ul>
+     *   <li>OFFICIAL_URL 模式：从首页/导航页扫描出一个版本号，没有变更条目</li>
+     *   <li>DataSufficiency=LOW 且 release body / commits / changelog entries 都没有</li>
+     * </ul>
+     */
+    private boolean isThinData(SearchAgent.SearchResult sr) {
+        if (sr == null) return true;
+        // OFFICIAL_URL 模式天然是 thin data
+        if ("OFFICIAL_URL".equals(sr.getUpdateMode())) {
+            return true;
+        }
+        // 其他模式：综合判断 release body / commits / changelog entries / rss 是否都为空
+        boolean hasReleaseBody = sr.getReleaseInfo() != null
+                && sr.getReleaseInfo().getBody() != null
+                && !sr.getReleaseInfo().getBody().isBlank();
+        boolean hasCommits = sr.getRecentCommits() != null && !sr.getRecentCommits().isEmpty();
+        boolean hasChangelog = sr.getChangelogEntries() != null && !sr.getChangelogEntries().isEmpty();
+        boolean hasRssContent = sr.getRssContent() != null && !sr.getRssContent().isBlank();
+        return !hasReleaseBody && !hasCommits && !hasChangelog && !hasRssContent;
+    }
+
+    /**
+     * 构建"稀缺数据"占位报告：诚实告诉读者只检测到版本号变化，
+     * 让其访问官方页面查看具体变更，避免 AI 编造内容。
+     */
+    private WriteResult buildStubReport(TrackedTech tech, SearchAgent.SearchResult sr) {
+        String version = sr.getDetectedVersion() != null ? sr.getDetectedVersion() : "新版本";
+        String title = tech.getName() + " 检测到版本变化：" + version;
+
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("## 版本检测\n");
+        sb.append("- **技术**：").append(tech.getName()).append("\n");
+        sb.append("- **检测到的版本**：").append(version).append("\n");
+        sb.append("- **检测来源**：").append(getModeLabel(sr.getUpdateMode())).append("\n");
+        if (sr.getDataSufficiency() != null) {
+            sb.append("- **数据充分度**：").append(sr.getDataSufficiency()).append("\n");
+        }
+        sb.append("\n## 说明\n");
+        sb.append("本次仅从官方页面侦测到版本号变化，**未拉取到具体变更内容**。\n");
+        sb.append("为避免编造细节误导读者，本报道暂不展开技术分析。\n");
+        sb.append("如需查看完整变更说明，请访问以下官方来源：\n\n");
+
+        if (sr.getSourceUrls() != null && !sr.getSourceUrls().isEmpty()) {
+            sb.append("## 来源链接\n");
+            for (String url : sr.getSourceUrls()) {
+                sb.append("- [").append(url).append("](").append(url).append(")\n");
+            }
+        } else {
+            sb.append("（未提供来源链接）\n");
+        }
+
+        return new WriteResult(title, sb.toString());
     }
 
     /**
@@ -130,6 +199,7 @@ public class WriterAgent {
             case "COMMIT" -> "开发动态";
             case "RSS" -> "更新公告";
             case "OFFICIAL_URL" -> "版本更新";
+            case "OFFICIAL_CHANGELOG" -> "官网版本更新";
             default -> "更新";
         };
     }
@@ -168,6 +238,30 @@ public class WriterAgent {
             context.append("\nAI 信息摘要: ").append(searchResult.getRawInfoSummary()).append("\n");
         }
 
+        // 官网更新日志页的条目数据
+        if (searchResult.getChangelogEntries() != null && !searchResult.getChangelogEntries().isEmpty()) {
+            context.append("\n官网更新日志条目:\n");
+            var entries = searchResult.getChangelogEntries();
+            for (int i = 0; i < Math.min(entries.size(), 5); i++) {
+                var e = entries.get(i);
+                context.append("\n--- 条目 ").append(i + 1).append(" ---\n");
+                context.append("标题: ").append(e.getTitle()).append("\n");
+                if (e.getVersion() != null) {
+                    context.append("版本: ").append(e.getVersion()).append("\n");
+                }
+                if (e.getDate() != null) {
+                    context.append("日期: ").append(e.getDate()).append("\n");
+                }
+                if (e.getLink() != null) {
+                    context.append("链接: ").append(e.getLink()).append("\n");
+                }
+                if (e.getContent() != null) {
+                    String c = e.getContent();
+                    context.append("内容:\n").append(c.length() > 1500 ? c.substring(0, 1500) + "..." : c).append("\n");
+                }
+            }
+        }
+
         context.append("\n来源链接:\n");
         for (String url : searchResult.getSourceUrls()) {
             context.append("- ").append(url).append("\n");
@@ -176,8 +270,31 @@ public class WriterAgent {
         String dataNote = switch (searchResult.getDataSufficiency()) {
             case HIGH -> "信息充分，请撰写详尽的技术分析报告。";
             case MEDIUM -> "信息中等，请基于已有数据撰写报告，不足之处注明。";
-            case LOW -> "信息有限（仅 Commit 活动），请如实说明，不要虚构细节。在报道中添加提示：'本次更新可能不是正式发布版本'。";
+            case LOW -> "信息有限（仅 Commit 活动或官网首页扫描），请如实说明，不要虚构细节。在报道中添加提示：'本次更新可能不是正式发布版本'。";
         };
+
+    // 大模型官网更新专属章节（仅在 OFFICIAL_CHANGELOG 模式下追加）
+    String modelSpecificSections = "";
+    if ("OFFICIAL_CHANGELOG".equals(searchResult.getUpdateMode())) {
+        modelSpecificSections = """
+
+                ## 模型能力与 API 变更
+                详细说明本次更新中模型能力的变化（如有）：
+                - 上下文长度（Context Window）是否有变化
+                - 支持的模态（文本/图像/音频/视频）是否有扩展
+                - API 参数是否有变更（temperature、top_p、max_tokens 等默认值或限制）
+                - 新增或废弃的 API 端点
+                - 价格调整（输入/输出 token 单价变化，是否推出免费额度）
+                - 多语言支持是否有变化
+
+                ## 性能基准
+                如果有公布 Benchmark 数据，列出关键指标变化：
+                - 推理速度（tokens/s）
+                - 准确率（MMLU、HumanEval、GSM8K 等）
+                - 与上一版本或竞品的对比
+
+                """;
+    }
 
     // 注意：不要使用 String.format / """.formatted 注入外部内容。
     // 外部内容(网页/Markdown/Commit message)经常包含 '%'，会触发 UnknownFormatConversionException。
@@ -202,7 +319,7 @@ public class WriterAgent {
                 - 说明变更的具体内容（是什么）
                 - 说明变更的技术原因（为什么）
                 - 说明对使用者的影响（影响谁、怎么影响）
-                如果 Release Notes 中列出了多个变更，**每一个都要讲解**，不能遗漏或笼统带过。
+                如果 Release Notes 或官网公告中列出了多个变更，**每一个都要讲解**，不能遗漏或笼统带过。
 
                 ## 破坏性变更与迁移指南
                 如果存在 Breaking Changes，必须明确列出并给出迁移建议。
@@ -218,7 +335,7 @@ public class WriterAgent {
 
                 ## 技术背景
                 简要介绍该技术在生态中的定位、主要竞品、适用场景。
-
+                """ + modelSpecificSections + """
                 ## 来源链接
                 列出所有来源 URL，使用 Markdown 链接格式。
 
@@ -227,6 +344,7 @@ public class WriterAgent {
                 - **第一行必须是 `# 报道标题`（一级标题），标题要简洁有力、体现核心价值，不能是机械的"技术名+版本号"**
                 - 标题示例（好）："Spring Boot 3.4 正式发布：虚拟线程全面 GA，启动速度再提 40%"
                 - 标题反例（差）："Spring Boot 3.4.0 发布"
+                - 大模型更新标题示例（好）："DeepSeek-V3-0324 发布：推理能力大幅提升，API 价格下调 50%"
                 - 其余章节使用 ## 二级标题
                 - 重点内容使用**加粗**
                 - 变更列表使用有序或无序列表

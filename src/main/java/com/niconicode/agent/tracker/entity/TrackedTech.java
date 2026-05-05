@@ -14,6 +14,7 @@ public class TrackedTech {
     private String category;
     private String githubRepo;
     private String officialUrl;
+    private String changelogUrl;        // 官网更新日志/公告页面 URL
     private String rssUrl;
     private String sitemapUrl;
     private String lastKnownVersion;
